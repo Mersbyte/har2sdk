@@ -22,6 +22,8 @@ const gen = (entries: Entry[], opts = {}) => generateFromHar(har(entries), opts)
 const CLI = join(ROOT, "dist/cli.js");
 const O = "https://api.acme.test";
 const tmp = (p: string) => mkdtempSync(join(tmpdir(), `har2sdk-r7-${p}-`));
+/** A text file of the repo, with \n line endings whatever the checkout did (Windows: CRLF). */
+const repoText = (path: string) => readFileSync(join(ROOT, path), "utf8").replace(/\r\n/g, "\n");
 
 /** Run the CLI; returns exit status and everything it printed. */
 function cli(args: string[], env: Record<string, string> = {}): { status: number; out: string } {
@@ -213,7 +215,7 @@ describe("E4 annotations of the wrong type are an error, not a crash", () => {
 // ── E5 / E8 ────────────────────────────────────────────────────────────────────
 
 describe("E5/E8 the README's example compiles under NodeNext and its type comments are true", () => {
-  const readme = readFileSync(join(ROOT, "README.md"), "utf8");
+  const readme = repoText("README.md");
   const code = readme.match(/```ts\n(import \{[\s\S]*?)```/)![1]!;
 
   it("the client is imported with an extension NodeNext accepts", () => {
@@ -241,10 +243,10 @@ describe("E5/E8 the README's example compiles under NodeNext and its type commen
       join(dir, "tsconfig.json"),
       JSON.stringify({ compilerOptions: { module: "nodenext", moduleResolution: "nodenext", target: "es2022", strict: true, exactOptionalPropertyTypes: true, noEmit: true, lib: ["es2022", "dom"], skipLibCheck: true }, files: ["main.ts"] }),
     );
-    const tsc = join(ROOT, "node_modules", ".bin", process.platform === "win32" ? "tsc.cmd" : "tsc");
+    const tsc = join(ROOT, "node_modules/typescript/bin/tsc");
     let out = "";
     try {
-      execFileSync(tsc, ["-p", dir], { encoding: "utf8", shell: process.platform === "win32" });
+      execFileSync(process.execPath, [tsc, "-p", join(dir, "tsconfig.json")], { encoding: "utf8" });
     } catch (err) {
       out = String((err as { stdout?: string }).stdout ?? err);
     }
@@ -356,7 +358,7 @@ function canConnect(host: string, port: number): Promise<boolean> {
 // ── E7 ─────────────────────────────────────────────────────────────────────────
 
 describe("E7 the numbers in README and LAUNCH.md match the repo", () => {
-  const fuzz = readFileSync(join(ROOT, "test/privacy-fuzz.test.ts"), "utf8");
+  const fuzz = repoText("test/privacy-fuzz.test.ts");
   const sites = fuzz.slice(fuzz.indexOf("const sites: Record<string, () => void> = {"), fuzz.indexOf("const chosen = r.shuffle(Object.keys(sites))"));
   // The sites, plus the three places every capture has: the profile, the members list and the headers.
   const kinds = [...sites.matchAll(/^ {4}[a-zA-Z]+: \(\) => \{/gm)].length + 3;
@@ -365,7 +367,7 @@ describe("E7 the numbers in README and LAUNCH.md match the repo", () => {
 
   for (const file of ["README.md", "docs/LAUNCH.md"]) {
     it(file, () => {
-      const text = readFileSync(join(ROOT, file), "utf8");
+      const text = repoText(file);
       for (const m of text.matchAll(/(\d+) kinds of (?:places|placements)/g)) expect(Number(m[1])).toBe(kinds);
       for (const m of text.matchAll(/\b(\w+) review rounds/gi)) expect(m[1]!.toLowerCase()).toBe(words[rounds]);
       expect(text).not.toMatch(/3,000/);
@@ -510,7 +512,7 @@ describe("E12 inspect warns about a --param that matched nothing, as generate do
 
 describe("E13 the fuzz test checks MCP and inspect --json on every seed", () => {
   it("no seed-number condition guards them", () => {
-    const fuzz = readFileSync(join(ROOT, "test/privacy-fuzz.test.ts"), "utf8");
+    const fuzz = repoText("test/privacy-fuzz.test.ts");
     expect(fuzz).not.toMatch(/if \(seed < FROM \+ \d\)/);
     expect(fuzz).toMatch(/"inspect --json"/);
     expect(fuzz).toMatch(/"MCP session"/);
@@ -521,7 +523,7 @@ describe("E13 the fuzz test checks MCP and inspect --json on every seed", () => 
 
 describe("E14 dead code is gone", () => {
   it("templateToRegExp, isEmptyShape, topLevelKeys", () => {
-    const src = ["template.ts", "infer.ts"].map((f) => readFileSync(join(ROOT, "src", f), "utf8")).join("\n");
+    const src = ["template.ts", "infer.ts"].map((f) => repoText(`src/${f}`)).join("\n");
     for (const name of ["templateToRegExp", "isEmptyShape", "topLevelKeys"]) expect(src).not.toContain(`function ${name}`);
   });
 });
