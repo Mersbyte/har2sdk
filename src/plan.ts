@@ -96,6 +96,7 @@ export function buildPlan(model: ApiModel, opts: PlanOptions = {}): Plan {
   const auto = registry.finalizeNames();
   if (auto.size) for (const op of ops) visitOp(op, (t) => renameRefs(t, auto));
   if (opts.annotations?.types) renameTypes(registry, ops, opts.annotations.types, warnings);
+  if (opts.baseUrl !== undefined) checkBaseUrl(opts.baseUrl);
   const baseUrl = (opts.baseUrl ?? model.primaryOrigin).replace(/\/+$/, "");
   return { model, clientName, baseUrl, registry, ops, warnings };
 }
@@ -160,6 +161,7 @@ function planOp(ep: Endpoint, model: ApiModel, registry: TypeRegistry, warnings:
     const hint = ep.graphql ? P + "Variables" : ep.rpc ? P + "Input" : P + "Body";
     registry.release(hint);
     let type: TypeNode;
+    if (rb.missing) warnings.push(`${ep.id}: the request body was not recorded${rb.kind === "multipart" ? " (browsers leave out multipart uploads)" : ""}, so its type is \`${rb.kind === "multipart" ? "FormData" : "unknown"}\`.`);
     if (rb.kind === "multipart") type = { k: "unknown" };
     else if (rb.kind === "text") type = { k: "string" };
     else type = registry.fromShape(rb.shape, [hint, (resource ?? P) + "Input"], resource);
@@ -299,4 +301,15 @@ function renameTypes(registry: TypeRegistry, ops: PlannedOp[], map: Record<strin
     if (to) nt.name = to;
   }
   registry.renameAliases(rename);
+}
+
+/** Throws unless `url` is an absolute http(s) URL: it becomes the SDK's default base URL. */
+export function checkBaseUrl(url: string): void {
+  let ok = false;
+  try {
+    ok = /^https?:$/.test(new URL(url).protocol);
+  } catch {
+    ok = false;
+  }
+  if (!ok) throw new Error(`Invalid base URL ${JSON.stringify(url.slice(0, 80))} (--base-url): use an absolute http(s) URL such as https://api.example.com.`);
 }

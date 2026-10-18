@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.6.2
+
+Fixes from a seventh review, an end-to-end "does it work" audit of 0.6.1. Every finding has a test in `test/review7.test.ts` (written first and seen failing), and the generated privacy test gained one placement type (30 in all).
+
+**Behaviour changes to know about**
+- Responses with status 204 or 205 and no body are API calls even when nothing else says so; a 304 or an empty, untyped answer joins the endpoint the capture shows elsewhere, and is otherwise skipped with a warning (E1).
+- Annotation files are checked against their format; a wrong type is an error that names the field (E4).
+- Usage hints import `./har2sdk-out/client.js`, which works under NodeNext as well as bundlers (E8).
+- A truncated HAR file, an empty one, a folder, entries that aren't requests and a `--host` that matches nothing each get their own error message (E11).
+- For the library: `loadHar`, `loadHarFile` and `parseHarText` throw a `HarError` for a capture with no entries, or with no entry that is a request/response pair, instead of returning an empty list (E11).
+
+**Correct output**
+- A 204 the page had read (Playwright stores it as `text: "", encoding: "base64"`, without `_resourceType`) was dropped as noise, and its endpoint was missing from the SDK (E1). Fixture: `test/fixtures/playwright/notes-204.har`, a real Playwright 1.56.1 recording.
+- A multipart upload whose body the browser left out had no body parameter; it gets a `FormData` one, and a missing request body gets a warning like a missing response body (E3).
+- `--base-url` is checked before anything is generated (E9); JSON nested deeper than 200 levels is treated as unparsed instead of overflowing the stack (E10).
+- `inspect` prints the same warnings as `generate`, e.g. a `--param` that matched nothing (E12).
+
+**Leaks closed**
+- A username in the file name of a URL (`avatars/<user>.png`, `<user>_avatar.jpg`, `<first>-<last>-cover.webp`) stayed in the mock's responses and in `--examples`. The scrubber now fakes recorded names inside file names. The leak guard reads `--examples` again: 0.6.0 (C17) had left the examples out because they keep timestamps on purpose, and that hid this leak; now only recorded dates and timestamps are exempt there (E2).
+
+**Tests and docs**
+- The MCP server not overwriting a foreign `client.ts`, refusing to write when the leak guard finds a value, and the mock listening only on `127.0.0.1` had no test; each has one now, checked by breaking the code on purpose (E6).
+- The privacy fuzz test runs the real CLI's `inspect --json` and a real MCP session on every seed, not only the first four (that was a speed limit in the test, not a bug) (E13).
+- README: the example's type comments are compiled against the demo's client in a test; `getOrder().status` is a plain `string` in the demo (only two values recorded), so the enum example is `listOrders` now; the annotation example names the class the code imports (E5, E8). README and LAUNCH.md numbers are checked against the repo (E7).
+- Removed three unused functions (`templateToRegExp`, `isEmptyShape`, `topLevelKeys`) (E14).
+
 ## 0.6.1
 
 Fixes from a sixth review, a pre-release security audit of 0.6.0. Every finding has a test in `test/review6.test.ts` (written first and seen failing), and the generated privacy test gained three placement types (29 in all) and a second suite that checks the readable outputs where the files are refused.

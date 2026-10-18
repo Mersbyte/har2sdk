@@ -590,12 +590,3 @@ function paramNames(tokens: (string | null)[], hints: Record<number, string> = {
   });
   return names;
 }
-
-export function templateToRegExp(tokens: Token[]): RegExp {
-  const body = tokens.map((t) => (t.kind === "param" ? "([^/]+)" + escapeRe(t.suffix ?? "") : escapeRe(encodeURIComponent(t.value)))).join("/");
-  return new RegExp(`^/${body}/?$`);
-}
-
-function escapeRe(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}

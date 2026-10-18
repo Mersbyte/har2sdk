@@ -201,17 +201,3 @@ export function mergeShapes(a: Shape, b: Shape): Shape {
   }
   return out;
 }
-
-/** Top-level keys of an object shape (or of array items), used for similarity. */
-export function topLevelKeys(shape: Shape | undefined): Set<string> {
-  const keys = new Set<string>();
-  if (!shape) return keys;
-  if (shape.object) for (const k of shape.object.props.keys()) keys.add(k);
-  if (shape.array?.items.object) for (const k of shape.array.items.object.props.keys()) keys.add("[]." + k);
-  if (shape.map) keys.add("{map}");
-  return keys;
-}
-
-export function isEmptyShape(shape: Shape | undefined): boolean {
-  return !shape || shape.count === 0;
-}

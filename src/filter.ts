@@ -13,6 +13,7 @@ export type DropReason =
   | "document"
   | "host-filter"
   | "failed"
+  | "unknown-type"
   | "not-api";
 
 const TRACKER_HOSTS = [
@@ -198,6 +199,11 @@ export function classify(ex: Exchange, opts: FilterOptions = {}): DropReason | u
   if (rt === "xhr" || rt === "fetch") return undefined;
   // Mutations that return nothing (204, empty 200) are still API calls.
   if (ex.method !== "GET" && ex.method !== "HEAD" && !ex.responseBody) return undefined;
+  // "No Content" is an API's answer, not a page's.
+  if ((ex.status === 204 || ex.status === 205) && !ex.responseBody) return undefined;
+  // Nothing says what this is (no body, no content type, no resource type): a 304
+  // revalidation, an empty 200. Kept if the same call was kept for another reason.
+  if (!ex.responseBody && !resMime && !rt) return "unknown-type";
   return "not-api";
 }
 
@@ -216,17 +222,33 @@ export interface FilterResult {
   dropped: Partial<Record<DropReason, number>>;
   /** First-party requests dropped as telemetry ("POST /rum"), at most five — worth a warning. */
   telemetry: string[];
+  /** Requests dropped because nothing said what they are (empty body, no content type), at most five. */
+  untyped: string[];
 }
 
 export function filterExchanges(exchanges: Exchange[], opts: FilterOptions = {}): FilterResult {
   const kept: Exchange[] = [];
   const dropped: Partial<Record<DropReason, number>> = {};
   const telemetry = new Set<string>();
+  const untyped: Exchange[] = [];
+  const label = (ex: Exchange) => `${ex.method} ${ex.pathname.length > 60 ? ex.pathname.slice(0, 60) + "…" : ex.pathname}`;
   for (const ex of exchanges) {
     const reason = classify(ex, opts);
-    if (reason) dropped[reason] = (dropped[reason] ?? 0) + 1;
+    if (reason === "unknown-type") untyped.push(ex);
+    else if (reason) dropped[reason] = (dropped[reason] ?? 0) + 1;
     else kept.push(ex);
-    if (reason === "telemetry" && telemetry.size < 5) telemetry.add(`${ex.method} ${ex.pathname.length > 60 ? ex.pathname.slice(0, 60) + "…" : ex.pathname}`);
+    if (reason === "telemetry" && telemetry.size < 5) telemetry.add(label(ex));
   }
-  return { kept, dropped, telemetry: [...telemetry] };
+  // An untyped answer to a call the capture shows elsewhere (a 304 after a 200) is that call.
+  const known = new Set(kept.map((ex) => `${ex.method} ${ex.origin}${ex.pathname}`));
+  const skipped = new Set<string>();
+  for (const ex of untyped) {
+    if (known.has(`${ex.method} ${ex.origin}${ex.pathname}`)) kept.push(ex);
+    else {
+      dropped["unknown-type"] = (dropped["unknown-type"] ?? 0) + 1;
+      if (skipped.size < 5) skipped.add(label(ex));
+    }
+  }
+  if (untyped.length) kept.sort((a, b) => a.index - b.index);
+  return { kept, dropped, telemetry: [...telemetry], untyped: [...skipped] };
 }

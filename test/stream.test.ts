@@ -46,7 +46,8 @@ describe("loadHarFile", () => {
   it("rejects what loadHar rejects, without quoting the file", async () => {
     await expect(loadHarFile(file("secret-token-123 not json"))).rejects.toThrow(HarError);
     await expect(loadHarFile(file('{"log": {"pages": []}}'))).rejects.toThrow(/No "log.entries" array/);
-    await expect(loadHarFile(file('{"log": {"entries": [{"request": '))).rejects.toThrow(/not valid JSON/);
+    // A file that stops mid-entry says it is cut off (review 7, E11).
+    await expect(loadHarFile(file('{"log": {"entries": [{"request": '))).rejects.toThrow(/cut off/);
     await expect(loadHarFile(file(""))).rejects.toThrow(HarError);
     await expect(loadHarFile(file("secret-token-123 not json"))).rejects.not.toThrow(/secret/);
   });

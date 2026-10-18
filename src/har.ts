@@ -84,6 +84,8 @@ export function parseHarText(text: string): HarEntry[] {
   try {
     data = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
   } catch (err) {
+    const t = text.trimEnd();
+    if (/^\s*[[{]/.test(text) && !/[}\]]$/.test(t)) throw truncated(0);
     throw new HarError(
       // Don't echo the parser's message: it quotes the file's first characters.
       `This file is not valid JSON, so it can't be a HAR file. ` +
@@ -102,7 +104,24 @@ export function parseHarText(text: string): HarEntry[] {
     if (typeof e.request.url !== "string" || typeof e.request.method !== "string") continue;
     out.push(e as unknown as HarEntry);
   }
+  checkEntries((entries as unknown[]).length, out.length);
   return out;
+}
+
+/** An empty capture, or entries none of which is a request/response pair, is an error worth explaining. */
+function checkEntries(total: number, valid: number): void {
+  if (total === 0) throw new HarError(`The capture has no requests (its entries array is empty). Turn on "Preserve log" in the Network tab, use the app, then export again.`);
+  if (valid === 0) {
+    throw new HarError(
+      `None of the ${total} entries is a request/response pair (each needs request.method, request.url and response). Is this a HAR export from the browser's Network tab?`,
+    );
+  }
+}
+
+function truncated(entries: number): HarError {
+  return new HarError(
+    `The file is cut off before its end (${entries} entr${entries === 1 ? "y" : "ies"} read): the export or the download didn't finish. Export the HAR again.`,
+  );
 }
 
 export function normaliseEntries(entries: HarEntry[]): Exchange[] {
@@ -131,7 +150,7 @@ export function normaliseEntries(entries: HarEntry[]): Exchange[] {
       pathname: url.pathname,
       query,
       requestHeaders,
-      requestBody: entry.request.postData ? parseRequestBody(entry.request.postData, reqMime) : undefined,
+      requestBody: entry.request.postData ? parseRequestBody(entry.request.postData, reqMime) : missingRequestBody(requestHeaders),
       status: Number(entry.response.status) || 0,
       responseHeaders,
       responseBody: entry.response.content ? parseResponseBody(entry.response.content, resMime) : undefined,
@@ -171,7 +190,8 @@ export async function loadHarFile(path: string, chunkSize = 1 << 20): Promise<Ex
   });
   const stream = createReadStream(path, { encoding: "utf8", highWaterMark: chunkSize });
   for await (const chunk of stream) scanner.write(chunk as string);
-  scanner.end();
+  scanner.end(index);
+  checkEntries(scanner.elements, index);
   return out;
 }
 
@@ -204,6 +224,9 @@ class EntryScanner {
   private capturing = false;
   private first = true;
   private found = false;
+  /** Elements of the entries array, whatever they are (objects or not). */
+  elements = 0;
+  private inElement = false;
 
   constructor(private readonly onEntry: (json: string) => void) {}
 
@@ -241,6 +264,14 @@ class EntryScanner {
         break;
       }
       const c = chunk[i]!;
+      // Count the entries array's elements: the first character of each one.
+      if (this.entriesDepth > 0 && !this.capturing && this.stack.length === this.entriesDepth) {
+        if (c === ",") this.inElement = false;
+        else if (!this.inElement && c !== "]" && c !== " " && c !== "\n" && c !== "\r" && c !== "\t") {
+          this.elements++;
+          this.inElement = true;
+        }
+      }
       if (c === '"') {
         this.inString = true;
         this.lastString = "";
@@ -284,9 +315,10 @@ class EntryScanner {
     if (this.capturing && captureFrom !== -1) this.parts.push(chunk.slice(captureFrom));
   }
 
-  end(): void {
+  /** @param read the entries handed out so far (for the message when the file is cut off). */
+  end(read = 0): void {
     if (this.first) throw invalidJson();
-    if (this.inString || this.capturing) throw invalidJson();
+    if (this.inString || this.capturing || this.stack.length) throw truncated(read);
     if (!this.found) throw new HarError(`No "log.entries" array found. Is this a HAR export from the browser's Network tab?`);
   }
 
@@ -331,6 +363,17 @@ export function isJsonMime(mime: string): boolean {
   return /[/+]json\b/.test(m) || m.includes("application/graphql-response");
 }
 
+/**
+ * A request the headers say had a body the HAR doesn't contain: browsers leave
+ * out multipart uploads (files), and some exporters every body.
+ */
+function missingRequestBody(headers: Map<string, string>): Body | undefined {
+  const mimeType = (headers.get("content-type") ?? "").toLowerCase();
+  const length = Number(headers.get("content-length") ?? "");
+  if (!mimeType || !(length > 0 || mimeType.startsWith("multipart/"))) return undefined;
+  return { kind: "missing", mimeType };
+}
+
 function parseRequestBody(pd: HarPostData, mimeHeader: string): Body | undefined {
   const mimeType = (pd.mimeType || mimeHeader || "").toLowerCase();
   let text = pd.text ?? "";
@@ -364,6 +407,9 @@ function parseResponseBody(content: HarContent, mimeHeader: string): Body | unde
   const mimeType = (content.mimeType || mimeHeader || "").toLowerCase();
   if (content.text === undefined || content.text === null) return isJsonMime(mimeType) ? { kind: "missing", mimeType } : undefined;
   let text: string = content.text;
+  // An empty body is no body, whatever the encoding: Playwright stores a 204 the page
+  // read as `text: "", encoding: "base64"` with no content type.
+  if (text === "") return undefined;
   if (content.encoding === "base64") {
     if (!isTextual(mimeType)) return { kind: "binary", mimeType };
     try {
@@ -407,11 +453,45 @@ function isTextual(mime: string): boolean {
 }
 
 function tryJson(text: string): { ok: true; value: unknown } | { ok: false } {
+  const value = parseJson(text);
+  return value === NOT_JSON ? { ok: false } : { ok: true, value };
+}
+
+/**
+ * JSON nested deeper than this is treated as not JSON: everything that walks a
+ * body (shapes, taint, the scrubber) recurses, and real APIs stay far below it.
+ */
+export const MAX_JSON_DEPTH = 200;
+
+export const NOT_JSON: unique symbol = Symbol("not JSON");
+
+/** `JSON.parse`, or NOT_JSON for invalid text and text nested deeper than MAX_JSON_DEPTH. */
+export function parseJson(text: string): unknown {
+  if (jsonDepth(text) > MAX_JSON_DEPTH) return NOT_JSON;
   try {
-    return { ok: true, value: JSON.parse(text) };
+    return JSON.parse(text);
   } catch {
-    return { ok: false };
+    return NOT_JSON;
   }
+}
+
+/** The deepest nesting of brackets outside strings, counted without recursion (stops past the limit). */
+function jsonDepth(text: string): number {
+  let depth = 0;
+  let max = 0;
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    if (inString) {
+      if (c === 92) i++; // backslash: skip the escaped character
+      else if (c === 34) inString = false;
+    } else if (c === 34) inString = true;
+    else if (c === 91 || c === 123) {
+      if (++depth > max) max = depth;
+      if (max > MAX_JSON_DEPTH) return max;
+    } else if (c === 93 || c === 125) depth--;
+  }
+  return max;
 }
 
 function safeDecode(s: string): string {

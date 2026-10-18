@@ -491,12 +491,43 @@ export class Scrubber {
         } catch {
           /* keep */
         }
-        if (/^v\d+(\.\d+)*$/i.test(d) || !((/\d/.test(d) && IDISH.test(d)) || this.known(d) || /@|\s/.test(d))) return s;
+        if (/^v\d+(\.\d+)*$/i.test(d)) return s;
         // Keep the file extension: a fake avatar is still a .jpg.
         const ext = d.match(/\.[A-Za-z0-9]{1,5}$/)?.[0] ?? "";
-        return this.fake(d.slice(0, d.length - ext.length).replace(/[^A-Za-z0-9._-]/g, "")) + ext;
+        if ((/\d/.test(d) && IDISH.test(d)) || this.known(d) || /@|\s/.test(d)) return this.fake(d.slice(0, d.length - ext.length).replace(/[^A-Za-z0-9._-]/g, "")) + ext;
+        // A recorded name inside a file name: avatars/mehmet.yilmaz.png, mehmet.yilmaz_avatar.jpg.
+        const named = this.fileStem(d.slice(0, d.length - ext.length));
+        return named === undefined ? s : named + ext;
       })
       .join("/");
+  }
+
+  /**
+   * The file stem with the runs of pieces that spell a recorded value faked
+   * ("mehmet.yilmaz_avatar" → "xkqrtb.pmnvcz_avatar"), or undefined if none does.
+   */
+  private fileStem(stem: string): string | undefined {
+    if (stem.length >= 3 && this.known(stem)) return this.fake(stem);
+    const parts = stem.split(/([._-]+)/);
+    if (parts.length < 3) return undefined;
+    let changed = false;
+    const out: string[] = [];
+    for (let i = 0; i < parts.length; i += 2) {
+      // The longest run starting here that is a recorded value.
+      let end = -1;
+      for (let j = parts.length - 1; j >= i && end < 0; j -= 2) {
+        const run = parts.slice(i, j + 1).join("");
+        if (run.length >= 3 && this.known(run)) end = j;
+      }
+      if (end < 0) {
+        out.push(parts[i]!, parts[i + 1] ?? "");
+        continue;
+      }
+      out.push(this.fake(parts.slice(i, end + 1).join("")), parts[end + 1] ?? "");
+      changed = true;
+      i = end;
+    }
+    return changed ? out.join("") : undefined;
   }
 
   /** A path parameter's value is an identifier by definition: always a fake (small numbers and dates stay). */
