@@ -1,0 +1,10 @@
+node_modules
+dist
+coverage
+*.log
+har2sdk-out
+# HAR files contain live cookies and tokens — never commit real captures.
+*.har
+!examples/**/*.har
+# Recordings of the fake demo shop (examples/demo-shop), not real traffic.
+!test/fixtures/browsers/*.har

@@ -1,0 +1,72 @@
+{
+  "name": "har2sdk",
+  "version": "0.6.1",
+  "description": "Turn browser network traffic (HAR) into a typed TypeScript SDK, an OpenAPI 3.1 spec and a mock server. Local, deterministic, no API key. Ships an MCP server so Claude can name and document every endpoint.",
+  "keywords": [
+    "har",
+    "openapi",
+    "sdk",
+    "sdk-generator",
+    "typescript",
+    "codegen",
+    "reverse-engineering",
+    "api",
+    "mock-server",
+    "graphql",
+    "mcp",
+    "model-context-protocol",
+    "claude",
+    "devtools"
+  ],
+  "homepage": "https://github.com/Mersbyte/har2sdk#readme",
+  "bugs": {
+    "url": "https://github.com/Mersbyte/har2sdk/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mersbyte/har2sdk.git"
+  },
+  "license": "MIT",
+  "author": "Mersbyte",
+  "type": "module",
+  "bin": {
+    "har2sdk": "dist/cli.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node -e \"require('fs').chmodSync('dist/cli.js', 0o755)\"",
+    "test": "npm run build && vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm test",
+    "demo:record": "node examples/demo-shop/record.mjs",
+    "set-owner": "node scripts/set-owner.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@seriousme/openapi-schema-validator": "^2.11.0",
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}
