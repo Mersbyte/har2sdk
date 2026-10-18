@@ -16,6 +16,7 @@
  *   "types": { "Item2": "OrderLine" }
  * }
  */
+import { z } from "zod";
 import type { ApiModel } from "./model.js";
 import { RESERVED_METHOD_NAMES } from "./naming.js";
 import { tokenText } from "./template.js";
@@ -39,13 +40,44 @@ export interface Annotations {
   types?: Record<string, string>;
 }
 
+/** The annotation file's shape: what a person or a model may write (extra keys are ignored). */
+export const ANNOTATIONS_SCHEMA = z.object({
+  clientName: z.string().optional(),
+  endpoints: z
+    .record(
+      z.string(),
+      z.object({
+        name: z.string().optional(),
+        description: z.string().optional(),
+        tag: z.string().optional(),
+        params: z.record(z.string(), z.string()).optional(),
+      }),
+    )
+    .optional(),
+  types: z.record(z.string(), z.string()).optional(),
+});
+
 export function parseAnnotations(text: string): Annotations {
   // Accept a chat reply as-is: strip prose and ```json fences around the object.
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
   const body = fenced ? fenced[1]! : text.slice(Math.max(0, text.indexOf("{")), text.lastIndexOf("}") + 1);
-  const data = JSON.parse(body) as Annotations;
+  const data: unknown = JSON.parse(body);
   if (typeof data !== "object" || data === null || Array.isArray(data)) throw new Error("Annotations must be a JSON object");
-  return data;
+  // A model's reply can have the wrong types ("name": 123): say where, don't crash later.
+  const parsed = ANNOTATIONS_SCHEMA.safeParse(data);
+  if (!parsed.success) {
+    const issues = parsed.error.issues.slice(0, 5).map((i) => `${pathText(i.path)}: ${i.message}`);
+    throw new Error(`Annotations don't match the expected format — ${issues.join("; ")}`);
+  }
+  return parsed.data as Annotations;
+}
+
+/** `["endpoints", "GET /x", "name"]` → `endpoints["GET /x"].name`. */
+function pathText(path: readonly PropertyKey[]): string {
+  if (!path.length) return "(the object)";
+  return path
+    .map((p, i) => (typeof p === "number" ? `[${p}]` : isIdentifier(String(p)) ? (i ? "." : "") + String(p) : `[${JSON.stringify(String(p))}]`))
+    .join("");
 }
 
 /** Mutates the model in place. Returns human-readable warnings. */

@@ -8,3 +8,5 @@ har2sdk-out
 !examples/**/*.har
 # Recordings of the fake demo shop (examples/demo-shop), not real traffic.
 !test/fixtures/browsers/*.har
+# A tiny fake notes app recorded by Playwright (test/fixtures/playwright/record-notes-204.mjs).
+!test/fixtures/playwright/*.har

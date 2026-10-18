@@ -10,7 +10,7 @@ import { generateTypeScript } from "./codegen.js";
 import type { Exchange } from "./har.js";
 import { analyzeExchanges, analyzeHarText, type AnalyzeOptions, type ApiModel } from "./model.js";
 import { generateOpenApi, type OpenApiOptions } from "./openapi.js";
-import { scanText, type LeakFinding } from "./leak.js";
+import { aliasOf, scanText, type LeakFinding } from "./leak.js";
 import { buildPlan, type Plan } from "./plan.js";
 
 export interface GenerateOptions extends AnalyzeOptions, OpenApiOptions {
@@ -43,13 +43,22 @@ export function generateFromModel(model: ApiModel, exchanges: Exchange[], opts: 
     "openapi.json": JSON.stringify(generateOpenApi(plan, opts), null, 2) + "\n",
   };
   // Leak guard: every output is checked against every recorded value. Examples are
-  // fake data from the scrubber, which keeps timestamps and vocabulary on purpose:
-  // the spec is checked without them (the scrubber has its own tests).
-  const scanned = opts.examples ? { ...files, "openapi.json": JSON.stringify(generateOpenApi(plan, { ...opts, examples: false }), null, 2) } : files;
-  const leaks = Object.entries(scanned).flatMap(([name, text]) => scanText(text, model.taint, name, boilerplate()));
+  // fake data from the scrubber, which keeps timestamps on purpose ("createdAt"):
+  // in a spec with examples, recorded dates are not reported, everything else is.
+  const ignore = (name: string) => (name === "openapi.json" && opts.examples ? withDates(boilerplate(), model.taint) : boilerplate());
+  const leaks = Object.entries(files).flatMap(([name, text]) => scanText(text, model.taint, name, ignore(name)));
   const warnings = [...plan.warnings];
   if (leaks.length) warnings.push(leakWarning(leaks));
   return { model, plan, exchanges, files, warnings, leaks };
+}
+
+/** The boilerplate words plus the recorded values that are dates or timestamps. */
+function withDates(words: Set<string>, taint: ApiModel["taint"]): Set<string> {
+  const out = new Set(words);
+  for (const v of taint.values) {
+    if (/^\d{4}-\d{2}-\d{2}([t ][\d:.]+(z|[+-]\d{2}:?\d{2})?)?$/.test(v)) out.add(v).add(aliasOf(v));
+  }
+  return out;
 }
 
 let BOILERPLATE: Set<string> | undefined;

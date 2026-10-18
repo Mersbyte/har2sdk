@@ -5,7 +5,7 @@
  *   infer types → detect auth & default headers → name everything
  */
 import { filterExchanges, type DropReason, type FilterOptions } from "./filter.js";
-import { isObject, loadHar, type Body, type Exchange } from "./har.js";
+import { isJsonMime, isObject, loadHar, NOT_JSON, parseJson, type Body, type Exchange } from "./har.js";
 import { emptyShape, observe, observeText, type Shape } from "./infer.js";
 import { assignNames } from "./naming.js";
 import { collectTaint, isDataLike, isIdentity, isIdentityKey, isIdKey, isTainted, scrubberFor, type Taint } from "./leak.js";
@@ -37,6 +37,8 @@ export interface BodyInfo {
   mimeType: string;
   shape: Shape;
   count: number;
+  /** Requests whose headers announce a body the capture doesn't contain. */
+  missing?: number;
 }
 
 export interface ResponseInfo {
@@ -149,13 +151,19 @@ export function analyzeHarText(text: string, opts: AnalyzeOptions = {}): { model
 }
 
 export function analyzeExchanges(all: Exchange[], opts: AnalyzeOptions = {}): ApiModel {
-  const { kept, dropped, telemetry } = filterExchanges(all, opts);
+  const { kept, dropped, telemetry, untyped } = filterExchanges(all, opts);
   const taint = collectTaint(kept);
   EXAMPLE_SCRUBBER = scrubberFor(taint);
   const warnings: string[] = [];
   if (telemetry.length) {
     warnings.push(
       `${dropped.telemetry} request${dropped.telemetry === 1 ? "" : "s"} on the app's own origin looked like telemetry and ${dropped.telemetry === 1 ? "was" : "were"} dropped (${telemetry.join(", ")}). Keep them with --include-path.`,
+    );
+  }
+  if (untyped.length) {
+    const n = dropped["unknown-type"]!;
+    warnings.push(
+      `${n} request${n === 1 ? " was" : "s were"} skipped because ${n === 1 ? "its" : "their"} content type is unknown (empty body, no Content-Type) (${untyped.join(", ")}). Keep ${n === 1 ? "it" : "them"} with --include-path.`,
     );
   }
 
@@ -343,11 +351,8 @@ function trpcUnits(ex: Exchange): Unit[] | undefined {
   let rawInput: unknown;
   if (ex.method === "GET") {
     if (q.input) {
-      try {
-        rawInput = JSON.parse(q.input);
-      } catch {
-        return undefined;
-      }
+      rawInput = parseJson(q.input);
+      if (rawInput === NOT_JSON) return undefined;
     }
   } else if (ex.requestBody?.kind === "json") rawInput = ex.requestBody.value;
   const inputs = procs.map((_, i) => (batch ? (isObject(rawInput) ? rawInput[String(i)] : undefined) : rawInput));
@@ -565,11 +570,10 @@ function splitGraphQL(ex: Exchange): Unit[] {
     const q = Object.fromEntries(ex.query);
     if (q.query || q.extensions) {
       const body: Record<string, unknown> = { query: q.query, operationName: q.operationName };
-      try {
-        if (q.variables) body.variables = JSON.parse(q.variables);
-        if (q.extensions) body.extensions = JSON.parse(q.extensions);
-      } catch {
-        /* not GraphQL */
+      // Invalid (or absurdly deep) JSON is left out, as if it weren't there.
+      for (const k of ["variables", "extensions"] as const) {
+        const v = q[k] ? parseJson(q[k]) : NOT_JSON;
+        if (v !== NOT_JSON) body[k] = v;
       }
       const gql = gqlFromObject(body, ex.pathname, true);
       if (gql) return [{ gql, responseBody: ex.responseBody }];
@@ -703,7 +707,14 @@ function addSample(a: Accumulator, ex: Exchange, pathValues: Record<string, stri
       }
     }
     const rb = unit.requestBody;
-    if (rb && (rb.kind === "json" || rb.kind === "form" || rb.kind === "multipart" || rb.kind === "text")) {
+    if (rb?.kind === "missing") {
+      // The headers say there was a body (a multipart upload the browser left out).
+      const kind = rb.mimeType.startsWith("multipart/") ? "multipart" : rb.mimeType.includes("x-www-form-urlencoded") ? "form" : isJsonMime(rb.mimeType) ? "json" : "text";
+      const body = a.bodies.get(kind) ?? { kind, mimeType: rb.mimeType, shape: emptyShape(), count: 0 };
+      body.count++;
+      body.missing = (body.missing ?? 0) + 1;
+      a.bodies.set(kind, body);
+    } else if (rb && (rb.kind === "json" || rb.kind === "form" || rb.kind === "multipart" || rb.kind === "text")) {
       const body = a.bodies.get(rb.kind) ?? { kind: rb.kind, mimeType: rb.mimeType, shape: emptyShape(), count: 0 };
       if (rb.kind === "json") observe(body.shape, rb.value);
       else if (rb.kind === "form") observeFields(body.shape, rb.fields);

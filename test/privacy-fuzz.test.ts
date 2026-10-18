@@ -13,7 +13,8 @@
  * small name-keyed dictionaries, issue keys, tenant slugs, file names and
  * non-ASCII dotted names in paths, and dates in a person's record; and
  * (review 6) a word of a person's name in a technical field, random tokens
- * without digits in paths, and prototype keys (`__proto__`, `constructor`).
+ * without digits in paths, and prototype keys (`__proto__`, `constructor`);
+ * (review 7) a username in the file name of a URL (`avatars/<user>.png`).
  * A second suite checks that readable outputs redact slugs, host names and
  * percent-encoded forms of a name wherever the files are refused.
  *
@@ -24,8 +25,8 @@
  * segment once and nowhere else) are a documented limit and are not placed.
  *
  * Every output is searched: client.ts, openapi.json (± --examples), the chat
- * prompt, the render functions MCP uses, a real MCP client session (first
- * seeds), `inspect --json` (first seeds) and every response of the mock.
+ * prompt, the render functions MCP uses, a real MCP client session, the real
+ * CLI's `inspect --json` and every response of the mock — on every seed.
  *
  * HAR2SDK_FUZZ_SEEDS=1000 for the long run; HAR2SDK_FUZZ_FROM=<n> to start elsewhere.
  */
@@ -311,6 +312,13 @@ function capture(seed: number): { entries: Entry[]; p: Persona; sites: string[];
     digitlessTokens: () => {
       e.push(entry({ method: "POST", url: `${origin}/api/${r.pick(["invite", "password-reset", "magic-link", "share"])}/${p.token}/${r.pick(["accept", "confirm", "open"])}`, reqHeaders: H(), reqBody: { ok: 1 }, resBody: { ok: true } }));
     },
+    // ── review 7 placements ──
+    fileNames: () => {
+      // A username in the file name of a URL: avatars/<user>.png, <user>_avatar.jpg, <user>-cover.webp.
+      const u = r.pick(p.usernames);
+      const name = `${u}${r.pick(["", "_avatar", "-photo", ".thumb"])}.${r.pick(["png", "jpg", "webp"])}`;
+      e.push(entry({ url: `${origin}/api/${r.pick(["profile", "people/1", "team/members/1"])}`, reqHeaders: H(), resBody: { id: 1, [k("identity")]: u, [r.pick(["avatar", "photo", "picture", "cover"])]: `https://cdn.${r.pick(["acme", "img"])}.test/${r.pick(["avatars", "u", "media/2026"])}/${name}` } }));
+    },
     protoKeys: () => {
       const body = JSON.stringify({ status: "ok" }).replace("{", `{"constructor":{"by":${JSON.stringify(p.username)}},"__proto__":{"email":${JSON.stringify(p.email)}},`);
       e.push(entry({ url: `${origin}/api/${r.pick(["meta", "objects", "schema"])}`, reqHeaders: H(), resText: body }));
@@ -402,12 +410,11 @@ describe(`privacy fuzz (${SEEDS} generated captures, random structure)`, () => {
         "render detail": plan.ops.map((o) => renderEndpointDetail(plan, o)).join("\n"),
         mock: await mockResponses(r, entries),
       };
-      if (seed < FROM + 4) {
-        const dir = mkdtempSync(join(tmpdir(), "har2sdk-fuzz-"));
-        writeFileSync(join(dir, "c.har"), text);
-        outputs["inspect --json"] = execFileSync(process.execPath, [join(ROOT, "dist/cli.js"), "inspect", join(dir, "c.har"), "--json"], { encoding: "utf8" });
-        outputs["MCP session"] = await mcpSession(join(dir, "c.har"), join(dir, "out"));
-      }
+      // The real CLI and a real MCP session, on every seed.
+      const dir = mkdtempSync(join(tmpdir(), "har2sdk-fuzz-"));
+      writeFileSync(join(dir, "c.har"), text);
+      outputs["inspect --json"] = execFileSync(process.execPath, [join(ROOT, "dist/cli.js"), "inspect", join(dir, "c.har"), "--json"], { encoding: "utf8" });
+      outputs["MCP session"] = await mcpSession(join(dir, "c.har"), join(dir, "out"));
       const leaks = Object.entries(outputs).flatMap(([where, t]) => findLeaks(t, p).map((l) => `${where}: ${l}`));
       expect({ sites, leaks }).toEqual({ sites, leaks: [] });
       // The engine's own guard agrees (it found nothing it would refuse).
@@ -439,12 +446,10 @@ describe(`readable outputs redact what the scanner finds (${SEEDS} generated cap
         "render list": renderEndpointList(plan),
         "render detail": plan.ops.map((o) => renderEndpointDetail(plan, o)).join("\n"),
       };
-      if (seed < FROM + 3) {
-        const dir = mkdtempSync(join(tmpdir(), "har2sdk-fuzz-"));
-        writeFileSync(join(dir, "c.har"), text);
-        outputs["inspect --json"] = execFileSync(process.execPath, [join(ROOT, "dist/cli.js"), "inspect", join(dir, "c.har"), "--json"], { encoding: "utf8" });
-        outputs["MCP session"] = await mcpSession(join(dir, "c.har"), join(dir, "out"));
-      }
+      const dir = mkdtempSync(join(tmpdir(), "har2sdk-fuzz-"));
+      writeFileSync(join(dir, "c.har"), text);
+      outputs["inspect --json"] = execFileSync(process.execPath, [join(ROOT, "dist/cli.js"), "inspect", join(dir, "c.har"), "--json"], { encoding: "utf8" });
+      outputs["MCP session"] = await mcpSession(join(dir, "c.har"), join(dir, "out"));
       const leaks = Object.entries(outputs).flatMap(([where, t]) => [...findLeaks(t, p), ...scanText(t, g.model.taint, where).map((f) => f.preview)].map((l) => `${where}: ${l}`));
       expect(leaks).toEqual([]);
     });

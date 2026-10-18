@@ -702,7 +702,7 @@ export function scanText(input: string, taint: Taint | undefined, where: string,
     }
   }
   for (const [a, forms] of aliasesIn(taint, grams)) {
-    if (hit.has(a)) continue;
+    if (hit.has(a) || ignore?.has(a)) continue;
     found.push({ where, preview: maskPreview(forms[0]!), kind: "identifier" });
   }
   // An identity with other separators: "ece.kaya" for "ece_kaya".

@@ -48,6 +48,7 @@ async function load(harPath: string, hosts?: string[]): Promise<{ model: ApiMode
   // Only read capture files: this tool must not become a way to read arbitrary files.
   if (!/\.(har|json)$/i.test(path)) throw new Error(`Expected a .har (or .json) file, got "${path.split(/[\\/]/).pop()}".`);
   const st = await stat(path);
+  if (st.isDirectory()) throw new Error(`"${path.split(/[\\/]/).pop()}" is a folder, not a HAR file. Pass the .har file inside it.`);
   const key = JSON.stringify(hosts ?? []);
   const hit = cache.get(path);
   if (hit && hit.mtimeMs === st.mtimeMs && hit.hosts === key) return { model: structuredClone(hit.model), exchanges: hit.exchanges, path };
@@ -134,7 +135,10 @@ export function createMcpServer(): McpServer {
     async ({ har_path, hosts }) => {
       try {
         const { model } = await load(har_path, hosts);
-        if (!model.endpoints.length) return fail(`No API calls found (${model.stats.entries} requests, all noise). Was "Preserve log" on and did the app make XHR/fetch calls?`);
+        if (!model.endpoints.length) {
+          if (hosts?.length && model.stats.dropped["host-filter"]) return fail(`None of the ${model.stats.entries} requests is on ${hosts.join(", ")}. Call analyze_har without hosts to see what the capture has.`);
+          return fail(`No API calls found (${model.stats.entries} requests, all noise). Was "Preserve log" on and did the app make XHR/fetch calls?`);
+        }
         const plan = buildPlan(model);
         return text(renderEndpointList(plan) + `\n\nNext: inspect_endpoint for anything unclear, then generate_sdk with annotations.`);
       } catch (err) {
@@ -215,6 +219,10 @@ export function createMcpServer(): McpServer {
         // …and really there: no symbolic link between that folder and the files.
         const linked = await linkBetween(root, outDir);
         if (linked) return fail(`${linked} is a symbolic link; har2sdk doesn't write through links. Choose another out_dir.`);
+        // Defence in depth: with no link between root and out_dir (checked above) the
+        // real path is always inside. It stays as an independent second check — it
+        // doesn't depend on lstat reporting every kind of link — not because a case
+        // is known that only it catches (review 7, E15).
         if (!inside(await realpath(root), await realTarget(outDir))) return fail(`out_dir resolves to a folder outside ${root}.`);
         await assertWritable(outDir, ["client.ts", "openapi.json", "har2sdk.annotations.json"]);
         // Never overwrite a client.ts / openapi.json that har2sdk didn't write.
@@ -240,7 +248,7 @@ export function createMcpServer(): McpServer {
           ...result.plan.ops.map((o) => `- ${signature(o)}`),
         ];
         if (result.warnings.length) lines.push("", "Warnings:", ...result.warnings.map((w) => `- ${w}`));
-        lines.push("", `Usage: import { ${result.plan.clientName} } from "./client"; const api = new ${result.plan.clientName}({ /* token, headers */ });`);
+        lines.push("", `Usage: import { ${result.plan.clientName} } from "./client.js"; const api = new ${result.plan.clientName}({ /* token, headers */ });`);
         return text(scrubText(lines.join("\n"), model.taint));
       } catch (err) {
         return fail(String((err as Error).message ?? err));

@@ -21,15 +21,18 @@ npx har2sdk capture.har
 Figuring out an undocumented API in DevTools → Network takes an afternoon: which endpoints exist, what the ids look like, which fields are optional, what auth it wants. har2sdk does it in one command for JSON APIs — REST, GraphQL, JSON-RPC and tRPC — and gives you a client you can import:
 
 ```ts
-import { AcmeShopClient } from "./har2sdk-out/client";
+import { AcmeShopClient } from "./har2sdk-out/client.js";
 
 const shop = new AcmeShopClient({ token: process.env.TOKEN });
 
 const page = await shop.listProducts({ category: "shoes", page: 1, limit: 4 });
 page.items[0].price.amount;            // number
 
+const orders = await shop.listOrders({ status: "delivered" });
+orders.items[0].status;                // "delivered" | "processing" | "shipped" | (string & {})
+
 const order = await shop.getOrder({ orderId: "ord_7Hx92kLm" });
-order.status;                          // "delivered" | "processing" | "shipped" | (string & {})
+order.shippingAddress.city;            // string
 ```
 
 All of that was inferred from one recording of the [demo shop](examples/demo-shop) — a small fake app clicked through by a real Chromium — with no spec and no config.
@@ -66,7 +69,7 @@ Needs Node 20+. Reads standard HAR 1.2: tested with Chrome-style exports and Pla
 | **Noise vs. API** | Drops images, fonts, scripts, page loads, CORS preflights, failed requests, ~80 analytics/ads/consent hosts and common first-party telemetry (`/g/collect`, `/_vercel/insights`, Sentry tunnels, fire-and-forget POSTs to `…/rum`, `…/beacon`). First-party drops are listed in a warning; `--include-path`, `--exclude-host` and `--exclude-path` adjust it. |
 | **Path parameters** | `/users/42/orders/ord_9f8a` → `/users/{userId}/orders/{orderId}`: numbers, UUIDs, ULIDs, prefixed ids, issue keys (`PROJ-7`), phone numbers, dates. Word-like segments become parameters on evidence from the capture: the response echoes the value as its own id (`/users/alice` → `{ "login": "alice" }`), a list response names its items by it (`/users/{u}/repos` lists `dotfiles` → `/repos/{owner}/{repo}`), or it was recorded as a user or tenant name. `/products/featured` stays an endpoint. Also: `{id}.json`, file names, locales (`/en-us/`), tenants (`/orgs/acme/`), dated API versions (`/api/2024-01/`). Wrong guess? `--param "/users/{login}"`. |
 | **Types** | Merges every sample: optional vs. required, nullable, formats (`date-time`, `uuid`, `email`, `uri`), dictionaries keyed by ids or other data as `Record<string, T>`. Categorical fields (`status`, `type`, `currency`…) get open enums — `"a" \| "b" \| (string & {})` — autocomplete without breaking on new values. Identical shapes are one type (`type Total = Price`). |
-| **Responses** | Different 2xx shapes become a union; recorded error bodies get a type per status and a guard (`if (isGetFileError(err)) err.body`). Bodies the browser didn't record become `unknown`, with a warning. |
+| **Responses** | Different 2xx shapes become a union; recorded error bodies get a type per status and a guard (`if (isGetFileError(err)) err.body`). Bodies the browser didn't record become `unknown` (a multipart upload `FormData`), with a warning — request and response bodies alike. |
 | **GraphQL & RPC** | Every GraphQL operation (named, anonymous, batched, GET, persisted), JSON-RPC 1.0/2.0 method and tRPC procedure is its own typed method. Data-carrying inline values in recorded documents (`user(id: 4815162342)`, `login(username: "…")`) become variables; small numbers and enum values stay. tRPC superjson: JSON values and the `meta` the app sent. |
 | **Auth & headers** | Bearer/`Token` schemes, Basic, API-key headers or query params, session cookies (trackers ignored), CSRF headers. Version/platform headers (`x-app-version: 3.4.1`) become defaults; other custom headers are only listed by name. |
 | **Several captures** | `har2sdk a.har b.har` merges them into one SDK. |
@@ -84,7 +87,7 @@ HAR files contain live session cookies, tokens and often other people's data. ha
 
 The guard is a heuristic with evidence from the capture, not a proof: a value with **no evidence anywhere** (a word used once as a path segment that nothing else names) can't be recognised, and one-word names of things (a category `"Books"`) are treated as vocabulary. Look over `har2sdk inspect` before publishing generated code. Details, and exactly what is and isn't collected: [SECURITY.md](SECURITY.md).
 
-It's tested with the inputs of six review rounds (`test/review*.test.ts`) and a generated privacy test that builds a random person and hides them in 29 kinds of places in a random capture, then checks every output, including a real MCP session and every mock response (30 seeds in CI; the long run of 1,000 seeds passes).
+It's tested with the inputs of seven review rounds (`test/review*.test.ts`) and a generated privacy test that builds a random person and hides them in 30 kinds of places in a random capture, then checks every output, including a real MCP session, the CLI's `inspect --json` and every mock response (30 seeds in CI; the long run of 1,000 seeds passes).
 
 **Treat `.har` files like passwords.** **Use it responsibly:** reverse-engineering an API you don't own can break its terms of use. Good uses: your own apps, legacy internal systems, services you're allowed to integrate with. Please don't publish SDKs for other companies' services.
 
@@ -119,7 +122,7 @@ Then ask: *"Turn ~/Downloads/capture.har into an SDK with great names."* Claude 
 
 ```json
 {
-  "clientName": "AcmeShop",
+  "clientName": "AcmeShopClient",
   "endpoints": {
     "POST /api/v1/newsletter": {
       "name": "subscribeToNewsletter",

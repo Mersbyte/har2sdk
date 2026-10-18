@@ -1,17 +1,17 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { clientNameFor, parseAnnotations, type Annotations } from "./annotations.js";
 import { VERSION } from "./codegen.js";
-import { HarError } from "./har.js";
+import { HarError, type Exchange } from "./har.js";
 import { generateFromModel, writeFiles } from "./index.js";
 import { listenMock } from "./mock.js";
-import { analyzeExchanges } from "./model.js";
+import { analyzeExchanges, type ApiModel } from "./model.js";
 import { loadHarFile, mergeExchanges } from "./har.js";
-import { buildPlan, type Plan } from "./plan.js";
+import { buildPlan, checkBaseUrl, type Plan } from "./plan.js";
 import { authSummary, renderChatPrompt } from "./summary.js";
 import { scrubText } from "./leak.js";
 import { c, guardTerminal, kb, methodColor, pad, stripControl } from "./term.js";
@@ -92,6 +92,12 @@ async function main(argv: string[]): Promise<number> {
     console.log(HELP);
     return values.help ? 0 : 1;
   }
+  // Check options before reading anything: a typo should fail fast and say which option.
+  if (values["base-url"] !== undefined) checkBaseUrl(values["base-url"]);
+  for (const [name, max] of [["port", 65535], ["delay", 600_000]] as const) {
+    const v = values[name];
+    if (v !== undefined && !(/^\d+$/.test(v) && Number(v) <= max)) throw new Error(`--${name} must be a whole number from 0 to ${max} (got ${JSON.stringify(v.slice(0, 20))}).`);
+  }
 
   if (command === "mcp") {
     const { runMcpServer } = await import("./mcp.js");
@@ -105,6 +111,10 @@ async function main(argv: string[]): Promise<number> {
     const harFile = resolve(file);
     if (!existsSync(harFile)) {
       console.error(c.red(`✗ File not found: ${file}`));
+      return 1;
+    }
+    if (statSync(harFile).isDirectory()) {
+      console.error(c.red(`✗ ${file} is a folder, not a HAR file. Pass the .har file inside it.`));
       return 1;
     }
     // Streamed: the file's text is never held in memory as a whole.
@@ -123,8 +133,7 @@ async function main(argv: string[]): Promise<number> {
   });
 
   if (!model.endpoints.length) {
-    console.error(c.yellow(`No API calls found in ${source} (${model.stats.entries} requests, all filtered as noise).`));
-    console.error(c.dim(`Tips: enable "Preserve log", use the app so it calls its API, then export again. Use --host to target a specific API host.`));
+    console.error(c.yellow(noApiMessage(model, exchanges, source, values.host)));
     return 1;
   }
 
@@ -162,7 +171,12 @@ async function main(argv: string[]): Promise<number> {
           2,
         ), model.taint),
       );
-    } else printOverview(plan, source);
+    } else {
+      printOverview(plan, source);
+      // The same notes `generate` prints (an unmatched --param, dropped telemetry…).
+      if (plan.warnings.length) console.log("");
+      for (const w of plan.warnings) console.log(`  ${c.yellow("!")} ${w}`);
+    }
     return 0;
   }
 
@@ -230,11 +244,28 @@ async function main(argv: string[]): Promise<number> {
   const rel = relative(process.cwd(), outDir) || ".";
   const label = (s: string) => pad(c.bold(s), 14);
   console.log(`
-  ${label("Use it")}import { ${result.plan.clientName} } from "./${rel.replace(/\\/g, "/")}/client";
+  ${label("Use it")}import { ${result.plan.clientName} } from "./${rel.replace(/\\/g, "/")}/client.js";
   ${" ".repeat(14)}const api = new ${result.plan.clientName}(${model.auth.bearer ? "{ token: process.env.TOKEN }" : ""});
   ${label("Better names")}har2sdk prompt ${rest[0]} --copy   ${c.dim("→ paste into Claude/ChatGPT, or use the MCP server")}
   ${label("Offline API")}har2sdk mock ${rest[0]}`);
   return 0;
+}
+
+/** Why nothing was kept, and what to do about it. */
+function noApiMessage(model: ApiModel, exchanges: Exchange[], source: string, hosts: string[] | undefined): string {
+  const total = model.stats.entries;
+  if (hosts?.length && (model.stats.dropped["host-filter"] ?? 0) > 0) {
+    const counts = new Map<string, number>();
+    for (const ex of exchanges) counts.set(ex.host, (counts.get(ex.host) ?? 0) + 1);
+    const seen = [...counts].sort((a, b) => b[1] - a[1]).slice(0, 6).map(([h, n]) => `${h} (${n})`);
+    return `None of the ${total} requests is on ${hosts.join(", ")}. Hosts in this capture: ${seen.join(", ")}. Pass one of them to --host, or leave --host out.`;
+  }
+  const dropped = Object.entries(model.stats.dropped).map(([k, v]) => `${v} ${k}`).join(", ");
+  return (
+    `No API calls found in ${source} (${total} requests, all filtered as noise${dropped ? `: ${dropped}` : ""}).\n` +
+    `Tips: enable "Preserve log", use the app so it calls its API, then export again.` +
+    (hosts?.length ? "" : " Use --host to target a specific API host.")
+  );
 }
 
 function printOverview(plan: Plan, source: string): void {
