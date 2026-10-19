@@ -79,7 +79,6 @@ export function createMockServer(model: ApiModel, exchanges: Exchange[], opts: M
     const method = (req.method ?? "GET").toUpperCase();
     const body = method === "GET" || method === "HEAD" ? "" : await readBody(req);
     if (body === undefined) {
-      res.setHeader("connection", "close");
       send(res, 413, "application/json", JSON.stringify({ error: `har2sdk mock: request body over ${MAX_BODY / 1024 / 1024} MB` }));
       opts.onRequest?.({ method, path: url.pathname + url.search, status: 413 });
       return;
@@ -259,27 +258,25 @@ function send(res: ServerResponse, status: number, contentType: string, payload:
 /** The largest request body the mock reads; a bigger one gets 413. */
 const MAX_BODY = 10 * 1024 * 1024;
 
-/** The request body as text, or undefined once it is larger than MAX_BODY (the rest is read and dropped). */
+/**
+ * The request body as text, or undefined if it is larger than MAX_BODY. A body
+ * that is too large is still read to its end (and dropped, never kept): answering
+ * while the client is still sending would reset the connection before it reads the 413.
+ */
 function readBody(req: IncomingMessage): Promise<string | undefined> {
   return new Promise((resolve) => {
-    if (Number(req.headers["content-length"] ?? 0) > MAX_BODY) {
-      req.resume();
-      resolve(undefined);
-      return;
-    }
     const chunks: Buffer[] = [];
     let size = 0;
-    let over = false;
+    let over = Number(req.headers["content-length"] ?? 0) > MAX_BODY;
     req.on("data", (c: Buffer) => {
       if (over) return;
       size += c.length;
       if (size > MAX_BODY) {
         over = true;
         chunks.length = 0;
-        resolve(undefined);
       } else chunks.push(c);
     });
-    req.on("end", () => over || resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("end", () => resolve(over ? undefined : Buffer.concat(chunks).toString("utf8")));
     req.on("error", () => resolve(""));
   });
 }
