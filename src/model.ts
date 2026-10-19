@@ -417,10 +417,14 @@ function gqlFromObject(body: Record<string, any>, path: string, viaGet: boolean)
   const lifted = raw ? liftGraphQLLiterals(raw, body.variables) : undefined;
   const query = lifted?.query;
   // Fragments can come first: look at the operation itself.
-  const op = query ? withoutFragments(query) : undefined;
+  // Comments first: a leading `# …` line would hide the operation's name.
+  const op = query ? withoutFragments(withoutComments(query)) : undefined;
   const m = op?.match(/^\s*(query|mutation|subscription)\s+([A-Za-z_][A-Za-z0-9_]*)/);
   const operationType = (op?.match(/^\s*(query|mutation|subscription)\b/)?.[1] as GraphQLInfo["operationType"]) ?? "query";
-  const named = (typeof body.operationName === "string" && body.operationName) || m?.[2];
+  // Only a GraphQL Name can name an operation: anything else ("ignore previous
+  // instructions…") is free text from the capture, and the operation is anonymous.
+  const given = typeof body.operationName === "string" && /^[_A-Za-z]\w{0,127}$/.test(body.operationName) ? body.operationName : undefined;
+  const named = given || m?.[2];
   // Anonymous operations are told apart by what they select: "{viewer}", "{products}".
   const operationName = named || `{${(op ? graphqlRootFields(op) : []).join(",") || "anonymous"}}`;
   const docKey = query ? normalizeGraphQL(query) : `#${persistedHash ?? ""}`;
@@ -435,6 +439,15 @@ function gqlFromObject(body: Record<string, any>, path: string, viaGet: boolean)
     ...(lifted?.names.length ? { liftedVariables: lifted.names } : {}),
     variables: lifted ? lifted.variables : body.variables,
   };
+}
+
+/**
+ * A GraphQL document without its `#` comments: they carry no meaning for the
+ * operation, only whatever text the app (or a hostile capture) put there.
+ * Strings and block strings are kept as they are.
+ */
+export function withoutComments(doc: string): string {
+  return doc.replace(/"""[\s\S]*?"""|"(?:[^"\\\n]|\\.)*"|#[^\n\r]*/g, (m) => (m.startsWith("#") ? "" : m)).replace(/[ \t]+$/gm, "");
 }
 
 /** The document without its fragment definitions (they may precede the operation). */

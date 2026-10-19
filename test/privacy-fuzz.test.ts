@@ -16,7 +16,8 @@
  * without digits in paths, and prototype keys (`__proto__`, `constructor`);
  * (review 7) a username in the file name of a URL (`avatars/<user>.png`).
  * A second suite checks that readable outputs redact slugs, host names and
- * percent-encoded forms of a name wherever the files are refused.
+ * percent-encoded forms of a name wherever the files are refused, and (review 8)
+ * show no GraphQL comment or free-text operation name carrying it.
  *
  * Fairness: every value is placed with *some* evidence a careful reader would
  * use — a personal or identity key somewhere in the capture, an id- or
@@ -437,6 +438,8 @@ describe(`readable outputs redact what the scanner finds (${SEEDS} generated cap
         entry({ url: `${origin}/api/${r.pick(["u", "in", "p"])}/${encodeURIComponent(slug)}/${r.pick(KEYS.sub)}`, resBody: { theme: "dark" } }),
         entry({ url: `https://${words(name).join("-")}${r.pick(["", "-uploads", "-files"])}.${r.pick(["s3.amazonaws.com", "myshopify.com", "vercel.app"])}/manifest.json`, resBody: { files: [{ key: "a", size: 1 }] } }),
         entry({ url: `${origin}/api/${r.pick(["notes", "files"])}/${encodeURIComponent(r.pick([name, name.replace(" ", "-")]))}/meta`, resBody: { size: 1 } }),
+        // (review 8) The name in a GraphQL comment and in a free-text operationName: what a model sees must not show them.
+        entry({ method: "POST", url: `${origin}/graphql`, reqBody: { operationName: `${r.pick(["Load", "Dashboard for", "Ask"])} ${name}`, query: `# ${r.pick(["requested by", "owner:", "for"])} ${name} <${p.email}>\nquery ${r.pick(["Dash", "Feed", "Home"])} { ${r.pick(["dash", "feed", "home"])} { id } }` }, resBody: { data: { dash: { id: 1 } } } }),
       ];
       const text = har(r.shuffle([...entries, ...extra]));
       const g = generateFromHar(text, { allowLeaks: true });

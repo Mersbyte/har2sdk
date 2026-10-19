@@ -3,10 +3,13 @@
 /** Split "userId", "user_id", "user-id", "UserID" into ["user", "id"]. */
 const WORDS_CACHE = new Map<string, string[]>();
 
+/** Longer input is cut: words are for names, and the case-split regexes are quadratic on long runs of capitals. */
+const MAX_WORDS_INPUT = 256;
+
 export function words(input: string): string[] {
   const hit = WORDS_CACHE.get(input);
   if (hit) return hit.slice();
-  const out = ascii(input)
+  const out = ascii(input.length > MAX_WORDS_INPUT ? input.slice(0, MAX_WORDS_INPUT) : input)
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
     .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
     .split(/[^A-Za-z0-9]+/)
