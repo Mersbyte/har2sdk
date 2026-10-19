@@ -471,10 +471,12 @@ function mapMarkup(text: string, fn: (value: string | number, key: string | unde
       }
       if (!/\/>$/.test(tok) && !/^(br|hr|img|input|meta|link|area|base|col|embed|source|track|wbr)$/i.test(name)) stack.push(name);
       // Attribute values; namespace declarations are structure.
-      return tok.replace(/([\w:.-]+)(\s*=\s*)(?:"([^"]*)"|'([^']*)')/g, (m, attr: string, eq: string, dq?: string, sq?: string) => {
+      // An attribute starts after white space: anchoring there keeps this linear on a
+      // tag with a huge run of name characters (no backtracking from every position).
+      return tok.replace(/(\s)([\w:.-]+)(\s*=\s*)(?:"([^"]*)"|'([^']*)')/g, (m, lead: string, attr: string, eq: string, dq?: string, sq?: string) => {
         if (/^xmlns(:|$)/.test(attr)) return m;
         const out = str(fn(decodeEntities(dq ?? sq ?? ""), attr.replace(/^.*:/, ""))).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
-        return `${attr}${eq}"${out}"`;
+        return `${lead}${attr}${eq}"${out}"`;
       });
     }
     if (tok === "<" || !tok.trim()) return tok;

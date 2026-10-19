@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.3
+
+Fixes from an eighth review, the last audit before publishing. Every finding has a test in `test/review8.test.ts` (written first and seen failing), and the second suite of the generated privacy test puts the person's name in a GraphQL comment and in a free-text `operationName`.
+
+**Security**
+- What a model sees showed GraphQL `#` comments and free-text `operationName`s from the capture as they were: room for a planted prompt injection. Comments are removed from the documents shown (and ignored when an operation is analysed: a leading comment used to hide its name and put its words into the endpoint id), an `operationName` that isn't a GraphQL Name makes the operation anonymous, and the endpoint list, every endpoint's detail and the chat prompt say that what comes from the capture is untrusted data (F1).
+- Regexes that were quadratic on long runs (`words()` on 40 KB of capitals: seconds; an XML tag with a 40 KB name run) could stall the CLI, the MCP server and the mock. `words()` reads at most 256 characters; the XML attribute pattern is anchored so it stays linear. A capture with such values now takes milliseconds. The mock reads request bodies up to 10 MB and answers 413 to bigger ones (F2).
+- Parallel `generate_sdk` calls on one folder could lose annotations (read-merge-write) or leave a `client.ts` and an `openapi.json` from different calls. The MCP server runs them one at a time per folder (F3).
+
+**Correct output**
+- Two types renamed to the same name by annotations were merged silently by TypeScript; the second rename is refused with a warning (F5).
+- A query parameter named `constructor`, `toString` or another `Object.prototype` member broke the client's types (`params = {}` has them); its SDK name gets a `Query` suffix, the wire name stays (F5).
+
+**Packaging**
+- `package.json` has `publishConfig: { access: "public", provenance: true }` (F4). With provenance, `npm publish` must run in CI with an OIDC token (e.g. GitHub Actions with `id-token: write`); a local publish needs `--provenance=false`.
+
 ## 0.6.2
 
 Fixes from a seventh review, an end-to-end "does it work" audit of 0.6.1. Every finding has a test in `test/review7.test.ts` (written first and seen failing), and the generated privacy test gained one placement type (30 in all).

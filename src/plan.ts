@@ -148,7 +148,8 @@ function planOp(ep: Endpoint, model: ApiModel, registry: TypeRegistry, warnings:
   const usedNames = new Set(pathParams.map((p) => p.name));
   const queryParams: PlannedParam[] = ep.queryParams.map((q) => {
     let name = q.name;
-    if (usedNames.has(name)) name = name + "Query";
+    // `constructor`, `toString`…: every object has them, so `params: XParams = {}` wouldn't type-check.
+    if (usedNames.has(name) || OBJECT_MEMBERS.has(name)) name = name + "Query";
     usedNames.add(name);
     let type = scalarParam(registry.fromShape(q.shape, [P + pascal(q.name)], undefined, q.name));
     if (q.array) type = { k: "array", items: type };
@@ -279,7 +280,8 @@ function renameTypes(registry: TypeRegistry, ops: PlannedOp[], map: Record<strin
       warnings.push(`No generated type named "${from}" to rename.`);
       continue;
     }
-    if (!isIdentifier(to) || registry.isTaken(to)) {
+    // Two types renamed to one name would merge silently (interfaces with one name merge).
+    if (!isIdentifier(to) || registry.isTaken(to) || [...rename.values()].includes(to)) {
       warnings.push(`Can't rename type "${from}" to "${to}" (invalid or already used).`);
       continue;
     }
@@ -313,3 +315,6 @@ export function checkBaseUrl(url: string): void {
   }
   if (!ok) throw new Error(`Invalid base URL ${JSON.stringify(url.slice(0, 80))} (--base-url): use an absolute http(s) URL such as https://api.example.com.`);
 }
+
+/** Names every object has (from Object.prototype): not usable as optional parameter names. */
+const OBJECT_MEMBERS = new Set(Object.getOwnPropertyNames(Object.prototype));
