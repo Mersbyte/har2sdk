@@ -5,6 +5,7 @@
  * engine (examples in OpenAPI, text handed to an LLM, the chat prompt) goes
  * through these functions first.
  */
+import { withoutQueryOrHash } from "./linear.js";
 import { setOwn, words } from "./words.js";
 
 export const REDACTED = "<redacted>";
@@ -452,7 +453,7 @@ export class Scrubber {
       }
     }
     // The API's own relative links ("/v1/customers?page=2"): the same rules as a URL's path.
-    if (/^\/[^\s]*$/.test(v) && !v.startsWith("//")) return personal ? REDACTED : this.path(v.replace(/[?#].*$/, ""));
+    if (/^\/[^\s]*$/.test(v) && !v.startsWith("//")) return personal ? REDACTED : this.path(withoutQueryOrHash(v));
     // IP addresses become documentation addresses (RFC 5737 / 3849).
     if (/^\d{1,3}(\.\d{1,3}){3}$/.test(v)) return `192.0.2.${(Number.parseInt(this.fake(v).replace(/\D/g, "").slice(0, 3) || "1", 10) % 254) + 1}`;
     if (/^[0-9a-f]{0,4}(:[0-9a-f]{0,4}){2,7}$/i.test(v) && v.includes("::") || /^[0-9a-f]{1,4}(:[0-9a-f]{1,4}){7}$/i.test(v)) return "2001:db8::" + (this.fakes.size + 1).toString(16);

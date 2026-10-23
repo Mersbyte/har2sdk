@@ -17,6 +17,7 @@
  * }
  */
 import { z } from "zod";
+import { fencedBody } from "./linear.js";
 import type { ApiModel } from "./model.js";
 import { RESERVED_METHOD_NAMES } from "./naming.js";
 import { tokenText } from "./template.js";
@@ -59,8 +60,8 @@ export const ANNOTATIONS_SCHEMA = z.object({
 
 export function parseAnnotations(text: string): Annotations {
   // Accept a chat reply as-is: strip prose and ```json fences around the object.
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  const body = fenced ? fenced[1]! : text.slice(Math.max(0, text.indexOf("{")), text.lastIndexOf("}") + 1);
+  const fenced = fencedBody(text);
+  const body = fenced !== undefined ? fenced : text.slice(Math.max(0, text.indexOf("{")), text.lastIndexOf("}") + 1);
   const data: unknown = JSON.parse(body);
   if (typeof data !== "object" || data === null || Array.isArray(data)) throw new Error("Annotations must be a JSON object");
   // A model's reply can have the wrong types ("name": 123): say where, don't crash later.

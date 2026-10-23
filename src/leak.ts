@@ -16,6 +16,7 @@
  */
 import type { Exchange } from "./har.js";
 import { isObject } from "./har.js";
+import { replacePercentRuns } from "./linear.js";
 import { isContactName, isDataKey, isEmail, isPersonalName, isSecretValue, isSensitiveName, Scrubber } from "./redact.js";
 import { singular, words } from "./words.js";
 
@@ -757,7 +758,7 @@ export function scrubText(text: string, taint: Taint | undefined): string {
     return out;
   };
   // Percent-encoded tokens are matched in their decoded form ("G%C3%BCl%C5%9Fen").
-  return redact(text).replace(/[^\s"'<>`|()[\]{},;]*%[0-9A-Fa-f]{2}[^\s"'<>`|()[\]{},;]*/g, (tok) => {
+  return replacePercentRuns(redact(text), (tok) => {
     let d: string;
     try {
       d = decodeURIComponent(tok);
