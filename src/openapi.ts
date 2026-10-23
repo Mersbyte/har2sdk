@@ -1,5 +1,6 @@
 /** OpenAPI 3.1 emitter, sharing the plan (and named schemas) with the TS SDK. */
 import { VERSION } from "./codegen.js";
+import { trimTrailingSlashes } from "./linear.js";
 import type { Plan, PlannedOp } from "./plan.js";
 import { namedToJsonSchema, toJsonSchema, type JsonSchema } from "./types.js";
 
@@ -25,7 +26,7 @@ export function generateOpenApi(plan: Plan, opts: OpenApiOptions = {}): Record<s
 
   // tRPC procedures each get their own path: /api/trpc/user.byId
   for (const op of ops.filter((o) => o.ep.rpc?.kind === "trpc")) {
-    const path = op.ep.path.replace(/\/+$/, "") + "/" + op.ep.rpc!.procedure;
+    const path = trimTrailingSlashes(op.ep.path) + "/" + op.ep.rpc!.procedure;
     const item = (paths[path] ??= {});
     item[op.ep.method.toLowerCase()] = trpcOperation(op);
   }

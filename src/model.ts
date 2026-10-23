@@ -6,6 +6,7 @@
  */
 import { filterExchanges, type DropReason, type FilterOptions } from "./filter.js";
 import { isJsonMime, isObject, loadHar, NOT_JSON, parseJson, type Body, type Exchange } from "./har.js";
+import { findFragmentHead, trimLineEnds } from "./linear.js";
 import { emptyShape, observe, observeText, type Shape } from "./infer.js";
 import { assignNames } from "./naming.js";
 import { collectTaint, isDataLike, isIdentity, isIdentityKey, isIdKey, isTainted, scrubberFor, type Taint } from "./leak.js";
@@ -447,23 +448,23 @@ function gqlFromObject(body: Record<string, any>, path: string, viaGet: boolean)
  * Strings and block strings are kept as they are.
  */
 export function withoutComments(doc: string): string {
-  return doc.replace(/"""[\s\S]*?"""|"(?:[^"\\\n]|\\.)*"|#[^\n\r]*/g, (m) => (m.startsWith("#") ? "" : m)).replace(/[ \t]+$/gm, "");
+  return trimLineEnds(doc.replace(/"""[\s\S]*?"""|"(?:[^"\\\n]|\\.)*"|#[^\n\r]*/g, (m) => (m.startsWith("#") ? "" : m)));
 }
 
 /** The document without its fragment definitions (they may precede the operation). */
 export function withoutFragments(doc: string): string {
   let out = doc;
   for (let guard = 0; guard < 50; guard++) {
-    const m = /(^|\})\s*fragment\s+[A-Za-z_]\w*\s+on\s+[A-Za-z_]\w*[^{]*\{/.exec(out);
+    const m = findFragmentHead(out);
     if (!m) break;
     let depth = 1;
-    let i = m.index + m[0].length;
+    let i = m.end;
     for (; i < out.length && depth > 0; i++) {
       if (out[i] === "{") depth++;
       else if (out[i] === "}") depth--;
       else if (out[i] === '"') i = Math.max(i, out.indexOf('"', i + 1));
     }
-    out = out.slice(0, m.index + m[1]!.length) + " " + out.slice(i);
+    out = out.slice(0, m.index + m.prefix.length) + " " + out.slice(i);
   }
   return out;
 }

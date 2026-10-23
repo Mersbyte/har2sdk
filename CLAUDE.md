@@ -46,4 +46,4 @@ har2sdk turns a browser HAR capture into a typed, zero-dependency TypeScript cli
 
 ## History
 
-Eight reviews so far, at v0.1, v0.3, v0.4, v0.5, two at v0.6.0 (a pre-release security audit), one at v0.6.1 (an end-to-end audit) and one at v0.6.2 (the last audit before publishing). Their findings and fixes are in CHANGELOG.md and `test/review*.test.ts`. The recurring lesson: heuristics fixed against one reviewer's inputs failed on the next reviewer's new inputs. Prefer evidence from the capture itself, such as how a value is used elsewhere in it, over judging a value by its shape.
+Nine reviews so far, at v0.1, v0.3, v0.4, v0.5, two at v0.6.0 (a pre-release security audit), one at v0.6.1 (an end-to-end audit), one at v0.6.2 (the last audit before publishing) and one at v0.6.4 (CodeQL's regex alerts). Their findings and fixes are in CHANGELOG.md and `test/review*.test.ts`. The recurring lesson: heuristics fixed against one reviewer's inputs failed on the next reviewer's new inputs. Prefer evidence from the capture itself, such as how a value is used elsewhere in it, over judging a value by its shape.

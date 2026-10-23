@@ -7,6 +7,7 @@ import { applyAnnotations, clientNameFor, isValidClientName, type Annotations } 
 import { mergeShapes, emptyShape, type Shape } from "./infer.js";
 import type { ApiModel, Endpoint } from "./model.js";
 import { renameRefs, TypeRegistry, type NamedType, type TypeNode } from "./types.js";
+import { trimTrailingSlashes } from "./linear.js";
 import { isActionEndpoint } from "./naming.js";
 import { isIdentifier, isPlural, pascal, singular, words } from "./words.js";
 
@@ -97,7 +98,7 @@ export function buildPlan(model: ApiModel, opts: PlanOptions = {}): Plan {
   if (auto.size) for (const op of ops) visitOp(op, (t) => renameRefs(t, auto));
   if (opts.annotations?.types) renameTypes(registry, ops, opts.annotations.types, warnings);
   if (opts.baseUrl !== undefined) checkBaseUrl(opts.baseUrl);
-  const baseUrl = (opts.baseUrl ?? model.primaryOrigin).replace(/\/+$/, "");
+  const baseUrl = trimTrailingSlashes(opts.baseUrl ?? model.primaryOrigin);
   return { model, clientName, baseUrl, registry, ops, warnings };
 }
 
