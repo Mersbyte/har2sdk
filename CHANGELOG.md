@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.6.4
+
+A privacy fix in the mock's fake data, an Auth section in the README, and tests that pin both.
+
+**Security**
+- When a fake drawn for a recorded value happened to equal it (about 1 in 26³ for a three-letter name), the fallback reversed it: the mock served `"adA"` for `"Ada"`, `"7x"` for `"x7"`, the recorded value backwards and in the wrong shape. A collision now draws again from the same hash stream, so the fake never derives from the recorded value; a last-resort bump of one character remains for the case where 9 draws in a row all return it. Outputs without a collision are unchanged. Found by a CI failure in `review.test.ts`; `test/scrubber.test.ts` has the seeds that reproduce it and a generated run over 20,000 seeds (#4).
+
+**Docs**
+- README: an Auth section. The recorded token never reaches `client.ts`; which auth options a client gets; the token is sent with the scheme the app used (bare if it was sent bare, `Bearer` if no auth was seen); a token function is called before every request; a 401 throws `ApiError` without retry or refresh, with a refresh recipe; the mock doesn't check auth (#3).
+
+**Tests**
+- `test/auth.test.ts` pins every claim in the Auth section and runs its refresh recipe as written. `test/nullability.test.ts` records one field as a string, as `null` and left out, in every order, and checks `client.ts`, `openapi.json`, typechecking under `exactOptionalPropertyTypes` and the mock (#3).
+
 ## 0.6.3
 
 Fixes from an eighth review, the last audit before publishing. Every finding has a test in `test/review8.test.ts` (written first and seen failing), and the second suite of the generated privacy test puts the person's name in a GraphQL comment and in a free-text `operationName`.
