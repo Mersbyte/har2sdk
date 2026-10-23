@@ -555,17 +555,26 @@ export class Scrubber {
       h ^= h << 5;
       return h >>> 0;
     };
-    const body = [...v.slice(prefix.length)].map((ch, i) => {
-      if (/[0-9]/.test(ch)) return String((next() % 9) + (i === 0 ? 1 : 0));
-      if (/[a-f]/.test(ch) && /^[0-9a-f-]+$/i.test(v)) return "abcdef"[next() % 6]!;
-      if (/[a-z]/.test(ch)) return String.fromCharCode(97 + (next() % 26));
-      if (/[A-Z]/.test(ch)) return String.fromCharCode(65 + (next() % 26));
-      return ch;
-    });
-    f = prefix + body.join("");
-    if (f === v) f = prefix + body.reverse().join("");
-    // Still the recorded value (a palindrome like "66"): bump the first digit or letter.
-    if (f === v) f = prefix + body.join("").replace(/[0-9a-zA-Z]/, (c) => (/\d/.test(c) ? String((Number(c) + 1) % 10) : c === "z" ? "a" : c === "Z" ? "A" : String.fromCharCode(c.charCodeAt(0) + 1)));
+    const rest = v.slice(prefix.length);
+    const draw = () =>
+      [...rest]
+        .map((ch, i) => {
+          if (/[0-9]/.test(ch)) return String((next() % 9) + (i === 0 ? 1 : 0));
+          if (/[a-f]/.test(ch) && /^[0-9a-f-]+$/i.test(v)) return "abcdef"[next() % 6]!;
+          if (/[a-z]/.test(ch)) return String.fromCharCode(97 + (next() % 26));
+          if (/[A-Z]/.test(ch)) return String.fromCharCode(65 + (next() % 26));
+          return ch;
+        })
+        .join("");
+    // Drew the recorded value itself: draw again from the same stream. Never derive the
+    // fake from the recorded value (reversing it kept it readable and broke its shape).
+    let body = draw();
+    for (let tries = 0; body === rest && tries < 8; tries++) body = draw();
+    // Still the recorded value (only separators, or a very unlucky run): bump the first digit or letter.
+    // This bump is still derived from the recorded value, but it only runs after 9 draws in a row
+    // all returned it, which is next to impossible for any value with a digit or letter in it.
+    if (body === rest) body = body.replace(/[0-9a-zA-Z]/, (c) => (/\d/.test(c) ? String((Number(c) + 1) % 10) : c === "z" ? "a" : c === "Z" ? "A" : String.fromCharCode(c.charCodeAt(0) + 1)));
+    f = prefix + body;
     this.fakes.set(v, f);
     return f;
   }
