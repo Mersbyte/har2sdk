@@ -76,6 +76,40 @@ Needs Node 20+. Reads standard HAR 1.2: tested with Chrome-style exports and Pla
 
 The generated `client.ts` has **zero dependencies**, uses the global `fetch` (Node 20+ and browsers), and compiles under `strict`, `exactOptionalPropertyTypes` and `erasableSyntaxOnly`. Non-2xx responses throw `ApiError` with the parsed body.
 
+## Auth
+
+The capture tells har2sdk *how* the app authenticated, never *with what*. The token, cookie or key you recorded is not copied into `client.ts` (if it were, the [leak guard](#privacy) would refuse to write the file). You pass your own:
+
+```ts
+new AcmeShopClient({ token: process.env.TOKEN });  // a string
+new AcmeShopClient({ token: () => getToken() });   // or a function, sync or async
+```
+
+- **Which options you get** depends on what the capture used: `token` (sent in `Authorization` with the scheme the app used, e.g. `Bearer …` or `Token …`, or bare if the app sent it bare; `Bearer` if no auth was seen), `basicAuth`, `apiKey` (in the header or query parameter the app used) and `cookie`. If no auth was seen, you get `token`.
+- **A token function is called before every request**, so it can hand out a fresh token each time. For anything else computed per request (a CSRF header, a signature), pass `headers: async () => ({ … })`.
+- **Refreshing is up to you.** On a `401` the client doesn't retry or refresh: it throws `ApiError` with `status`, the parsed `body` and the `operation` that failed. One way to handle it:
+
+  ```ts
+  import { AcmeShopClient, ApiError } from "./har2sdk-out/client.js";
+
+  let token = await login();
+  const shop = new AcmeShopClient({ token: () => token });
+
+  async function withRefresh<T>(call: () => Promise<T>): Promise<T> {
+    try {
+      return await call();
+    } catch (err) {
+      if (!(err instanceof ApiError) || err.status !== 401) throw err;
+      token = await refresh();
+      return call();
+    }
+  }
+
+  const me = await withRefresh(() => shop.getMe());
+  ```
+
+- **The mock doesn't check auth.** Any token, or none, gets the same response.
+
 ## Privacy
 
 HAR files contain live session cookies, tokens and often other people's data. har2sdk:
