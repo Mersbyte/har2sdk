@@ -6,7 +6,7 @@
  */
 import { filterExchanges, type DropReason, type FilterOptions } from "./filter.js";
 import { isJsonMime, isObject, loadHar, NOT_JSON, parseJson, type Body, type Exchange } from "./har.js";
-import { findFragmentHead, graphqlTokens, removeHashComments, replaceQuoted, trimLineEnds } from "./linear.js";
+import { findFragmentHead, graphqlListItems, graphqlLiftMatches, graphqlTokens, removeHashComments, replaceQuoted, trimLineEnds } from "./linear.js";
 import { emptyShape, observe, observeText, type Shape } from "./infer.js";
 import { assignNames } from "./naming.js";
 import { collectTaint, isDataLike, isIdentity, isIdentityKey, isIdKey, isTainted, scrubberFor, type Taint } from "./leak.js";
@@ -468,9 +468,7 @@ export function withoutFragments(doc: string): string {
 
 /** Whitespace and literal values folded away: two recordings of the same operation compare equal. */
 export function normalizeGraphQL(doc: string): string {
-  return doc
-    .replace(/#[^\n]*/g, "")
-    .replace(/"(?:[^"\\]|\\.)*"/g, '""')
+  return replaceQuoted(doc.replace(/#[^\n]*/g, ""), () => '""', true)
     .replace(/(?<![A-Za-z_$])-?\d+(\.\d+)?/g, "0")
     .replace(/\s+/g, " ")
     .replace(/\s*([{}():,!$=@\[\]])\s*/g, "$1")
@@ -483,14 +481,10 @@ export function normalizeGraphQL(doc: string): string {
  * strings) become variables: the document stays valid, the SDK method takes
  * them as parameters, and no recorded value is baked in. Small numbers
  * (`first: 20`) and enum values stay: they are part of the query's logic.
+ * The document is read by graphqlLiftMatches (linear.ts), which matches what
+ * the regex GQL_LIFT that it replaces (quoted in its comment) matched, without
+ * that regex's exponential backtracking.
  */
-const GQL_STRING = String.raw`"""[\s\S]*?"""|"(?:[^"\\\n]|\\.)*"(?!")`;
-const GQL_NUMBER = String.raw`-?\d+(?![\w.])`;
-const GQL_LIFT = new RegExp(
-  String.raw`#[^\n]*|"""[\s\S]*?"""|"(?:[^"\\\n]|\\.)*"|\b([A-Za-z_][A-Za-z0-9_]*)(\s*:\s*)(${GQL_STRING}|${GQL_NUMBER}|\[\s*(?:(?:${GQL_STRING}|${GQL_NUMBER})\s*,?\s*)+\])`,
-  "g",
-);
-
 function liftGraphQLLiterals(doc: string, variables: unknown): { query: string; variables: unknown; names: string[] } {
   const taken = new Set([...doc.matchAll(/\$([A-Za-z_][A-Za-z0-9_]*)/g)].map((m) => m[1]!));
   const defs: string[] = [];
@@ -510,12 +504,12 @@ function liftGraphQLLiterals(doc: string, variables: unknown): { query: string; 
   };
   // Numbers are data when they look like ids: an id argument, or six digits or more.
   const dataNumber = (arg: string, n: number) => Number.isInteger(n) && (idArg(arg) || String(Math.abs(n)).length >= 6);
-  const body = doc.replace(GQL_LIFT, (m, arg: string | undefined, sep: string, lit: string) => {
+  const lift = (m: string, arg: string | undefined, sep: string, lit: string): string => {
     if (!arg) return m; // a comment or a string that isn't an argument value
     let value: unknown;
     let type: string;
     if (lit.startsWith("[")) {
-      const items = [...lit.matchAll(new RegExp(`${GQL_STRING}|${GQL_NUMBER}`, "g"))].map((x) => scalar(x[0]));
+      const items = [...graphqlListItems(lit)].map(([start, end]) => scalar(lit.slice(start, end)));
       if (!items.some((x) => typeof x === "string" || dataNumber(arg, x))) return m;
       value = items;
       type = `[${items.every((x) => typeof x === "number") ? (idArg(arg) ? "ID" : "Int") : idArg(arg) ? "ID" : "String"}!]`;
@@ -535,7 +529,14 @@ function liftGraphQLLiterals(doc: string, variables: unknown): { query: string; 
     defs.push(`$${name}: ${type}!`);
     setOwn(values, name, value);
     return `${arg}${sep}$${name}`;
-  });
+  };
+  let body = "";
+  let last = 0;
+  for (const m of graphqlLiftMatches(doc)) {
+    body += doc.slice(last, m.index) + lift(m[0], m[1], m[2]!, m[3]!);
+    last = m.index + m[0].length;
+  }
+  body += doc.slice(last);
   if (!defs.length) return { query: doc, variables, names };
   const query = insertVariableDefinitions(body, defs);
   if (query === undefined) return { query: replaceQuoted(doc, (s) => (isDataLike(s.slice(1, -1)) ? JSON.stringify(REDACTED) : s)), variables, names: [] };

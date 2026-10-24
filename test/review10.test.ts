@@ -9,17 +9,32 @@
  * of them in the middle of a token from each of its characters (50 KB: 1.5 s).
  * Recorded values are at most 4,000 characters, so H7–H9 need many of them.
  *
+ * H10–H12 are the same patterns where CodeQL didn't flag them: in
+ * normalizeGraphQL and liftGraphQLLiterals (model.ts). The literal regex there
+ * was also exponential on a list that doesn't close (`x: [1  1  1 …`: 58
+ * bytes took 8 s, each item doubling it), reachable from any GraphQL request.
+ *
  * Each block has the attack input with a time limit, and a generated variant
  * that compares the replacement with the original regex. H1–H3 time the
- * function only: a whole capture with that input still meets the same pattern
- * in normalizeGraphQL and liftGraphQLLiterals (model.ts), which CodeQL did not
- * flag and which this round leaves as they are.
+ * function; H10 times a whole capture with their input.
  */
 import { describe, expect, it } from "vitest";
 import { loadHar } from "../src/har.js";
 import { collectTaint, scanText, scrubText, type Taint } from "../src/leak.js";
-import { graphqlLiteralMatches, graphqlTokens, quotedStrings, removeHashComments, replaceQuoted, trimDotsDashesTildes, trimLineEnds } from "../src/linear.js";
-import { graphqlRootFields, withoutComments } from "../src/model.js";
+import { generateFromHar } from "../src/index.js";
+import {
+  graphqlListItems,
+  graphqlLiftMatches,
+  graphqlLiteralMatches,
+  graphqlTokens,
+  isSpaceCode,
+  quotedStrings,
+  removeHashComments,
+  replaceQuoted,
+  trimDotsDashesTildes,
+  trimLineEnds,
+} from "../src/linear.js";
+import { graphqlRootFields, normalizeGraphQL, withoutComments } from "../src/model.js";
 import { entry, har } from "./helpers.js";
 
 const O = "https://api.acme.test";
@@ -278,4 +293,113 @@ describe("H9 recorded values are trimmed in linear time when text is scrubbed (l
   });
 
   it("generated: trimDotsDashesTildes equals the original regex replace", trimIsUnchanged);
+});
+
+// ── H10 ────────────────────────────────────────────────────────────────────────
+
+/** normalizeGraphQL as it was in 0.6.4. */
+function normalizeGraphQLBefore(doc: string): string {
+  return doc
+    .replace(/#[^\n]*/g, "")
+    .replace(/"(?:[^"\\]|\\.)*"/g, '""')
+    .replace(/(?<![A-Za-z_$])-?\d+(\.\d+)?/g, "0")
+    .replace(/\s+/g, " ")
+    .replace(/\s*([{}():,!$=@\[\]])\s*/g, "$1")
+    .trim();
+}
+
+describe("H10 strings are folded in linear time when two GraphQL documents are compared (model.ts normalizeGraphQL)", () => {
+  it("a capture with a 200 KB string of escaped quotes that doesn't close", SLOW, () => {
+    expect(timed(() => generateFromHar(gqlCapture("query Q { a(x: " + ESCAPED + ") }")))).toBeLessThan(LIMIT_MS);
+  });
+
+  it("normalizeGraphQL on 200 KB of escaped quotes", () => {
+    expect(timed(() => normalizeGraphQL(ESCAPED))).toBeLessThan(LIMIT_MS);
+  });
+
+  it('generated: replaceQuoted(s, fn, true) equals s.replace(/"(?:[^"\\\\]|\\\\.)*"/g, fn)', () => {
+    for (let seed = 0; seed < SEEDS; seed++) {
+      const s = generated(seed, STRING_PIECES, 30);
+      expect(replaceQuoted(s, () => '""', true), `seed ${seed}: ${JSON.stringify(s)}`).toBe(s.replace(/"(?:[^"\\]|\\.)*"/g, '""'));
+    }
+  });
+
+  it("generated: normalizeGraphQL is unchanged", () => {
+    const alphabet = [...STRING_PIECES, "{", "}", "(", ")", ":", "a", "-1", "2.5", "$v", "\t", "  "];
+    for (let seed = 0; seed < SEEDS; seed++) {
+      const doc = generated(seed, alphabet, 30);
+      expect(normalizeGraphQL(doc), `seed ${seed}: ${JSON.stringify(doc)}`).toBe(normalizeGraphQLBefore(doc));
+    }
+  });
+});
+
+// ── H11 ────────────────────────────────────────────────────────────────────────
+
+const LIFT_STRING = String.raw`"""[\s\S]*?"""|"(?:[^"\\\n]|\\.)*"(?!")`;
+const LIFT_NUMBER = String.raw`-?\d+(?![\w.])`;
+/** GQL_LIFT as it was in 0.6.4. */
+const LIFT = new RegExp(
+  String.raw`#[^\n]*|"""[\s\S]*?"""|"(?:[^"\\\n]|\\.)*"|\b([A-Za-z_][A-Za-z0-9_]*)(\s*:\s*)(${LIFT_STRING}|${LIFT_NUMBER}|\[\s*(?:(?:${LIFT_STRING}|${LIFT_NUMBER})\s*,?\s*)+\])`,
+  "g",
+);
+
+describe("H11 literals to lift are found in linear time (model.ts liftGraphQLLiterals)", () => {
+  it("a capture with a list argument of 200 KB that doesn't close", SLOW, () => {
+    // The old regex took 29 s on a whole capture with 19 of these items (60 bytes).
+    expect(timed(() => generateFromHar(gqlCapture("query Q { a(ids: [" + "1  ".repeat(N / 3) + ") }")))).toBeLessThan(LIMIT_MS);
+  });
+
+  it("a list of block strings where each `\"\"\"` could end the one before", SLOW, () => {
+    const doc = 'a(x: ["""' + ' """ x'.repeat(N / 6) + "]";
+    expect(timed(() => [...graphqlLiftMatches(doc)])).toBeLessThan(LIMIT_MS);
+  });
+
+  it("a list that does close is still lifted", () => {
+    const r = generateFromHar(gqlCapture('query Q { users(ids: ["u_8f3k2", "u_9d1x0"], first: 20) { id } }'));
+    const query = JSON.stringify(r.model);
+    expect(query).not.toContain("u_8f3k2");
+    expect(query).toContain("first: 20");
+  });
+
+  it("isSpaceCode matches \\s on every UTF-16 code unit", () => {
+    for (let c = 0; c < 0x10000; c++) if (isSpaceCode(c) !== /\s/.test(String.fromCharCode(c))) expect.fail(`U+${c.toString(16)}`);
+  });
+
+  it("generated: graphqlLiftMatches yields the original regex's matches", () => {
+    const alphabet = [...STRING_PIECES, "ids", "x", "_9", " : ", ": ", "[", "[", "]", "]", ",", ", ", " ", "1", "123456", "-", "-7", ".", "a", '"a"', '"""b"""', "\t"];
+    for (let seed = 0; seed < SEEDS; seed++) {
+      // Short, because the original regex is exponential on lists.
+      const doc = generated(seed, alphabet, 20);
+      expect([...graphqlLiftMatches(doc)].map(plain), `seed ${seed}: ${JSON.stringify(doc)}`).toEqual([...doc.matchAll(LIFT)].map(plain));
+    }
+  });
+
+  it("generated: graphqlLiftMatches yields the original regex's matches on list arguments", () => {
+    const alphabet = ['"""', '"""', '"', "\\", '\\"', "\n", " ", "  ", ",", ", ", "]", "1", "-2", "1a", "1.", '"a"', '"""b"""', "x"];
+    for (let seed = 0; seed < SEEDS; seed++) {
+      const doc = "ids: [" + generated(seed, alphabet, 16) + (seed % 2 ? "]" : "");
+      expect([...graphqlLiftMatches(doc)].map(plain), `seed ${seed}: ${JSON.stringify(doc)}`).toEqual([...doc.matchAll(LIFT)].map(plain));
+    }
+  });
+});
+
+// ── H12 ────────────────────────────────────────────────────────────────────────
+
+describe("H12 the items of a list literal are found in linear time (model.ts liftGraphQLLiterals)", () => {
+  it("a 200 KB run of digits followed by a letter", () => {
+    expect(timed(() => [...graphqlListItems("1".repeat(N) + "a")])).toBeLessThan(LIMIT_MS);
+  });
+
+  it("200 KB of escaped quotes", () => {
+    expect(timed(() => [...graphqlListItems(ESCAPED)])).toBeLessThan(LIMIT_MS);
+  });
+
+  it("generated: graphqlListItems equals the original regex's matches", () => {
+    const items = new RegExp(`${LIFT_STRING}|${LIFT_NUMBER}`, "g");
+    const alphabet = [...STRING_PIECES, "[", "]", ",", " ", "1", "123", "-", "-4", "1a", "1.", "x", "_"];
+    for (let seed = 0; seed < SEEDS; seed++) {
+      const s = generated(seed, alphabet, 30);
+      expect([...graphqlListItems(s)], `seed ${seed}: ${JSON.stringify(s)}`).toEqual([...s.matchAll(items)].map((m) => [m.index, m.index + m[0].length]));
+    }
+  });
 });

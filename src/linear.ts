@@ -129,11 +129,11 @@ export function* quotedStrings(s: string, newline = false): Generator<[number, n
   }
 }
 
-/** `s.replace(/"(?:[^"\\\n]|\\.)*"/g, fn)`. */
-export function replaceQuoted(s: string, fn: (quoted: string) => string): string {
+/** `s.replace(/"(?:[^"\\\n]|\\.)*"/g, fn)` (`/"(?:[^"\\]|\\.)*"/g` when `newline` is true). */
+export function replaceQuoted(s: string, fn: (quoted: string) => string, newline = false): string {
   let out = "";
   let last = 0;
-  for (const [start, end] of quotedStrings(s)) {
+  for (const [start, end] of quotedStrings(s, newline)) {
     out += s.slice(last, start) + fn(s.slice(start, end));
     last = end;
   }
@@ -255,5 +255,196 @@ export function* graphqlLiteralMatches(doc: string): Generator<GraphqlLiteral> {
     // The string doesn't close. Without it, nothing matches at m.index (a
     // name or a `"`): the regex moved on to the next character.
     re.lastIndex = m.index + 1;
+  }
+}
+
+/** What `\s` matches (without the u flag). */
+export function isSpaceCode(c: number): boolean {
+  return (
+    (c >= 9 && c <= 13) || c === 32 || c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) ||
+    c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000 || c === 0xfeff
+  );
+}
+
+const isDigitCode = (c: number) => c >= 48 && c <= 57;
+const isWordCode = (c: number) => isDigitCode(c) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c === 95;
+
+/**
+ * Lookup tables over a GraphQL document, filled right to left in one pass so
+ * that no position is scanned twice:
+ * - `space[i]`: the first index at or after `i` that `\s` doesn't match;
+ * - `digits[i]`: the first index at or after `i` that isn't a digit;
+ * - `body[i]`: the index after the `"` that closes a string whose body
+ *   (`(?:[^"\\\n]|\\.)*`) starts at `i`, or -1 if it doesn't close.
+ */
+class GraphqlTables {
+  readonly space: Int32Array;
+  readonly digits: Int32Array;
+  readonly body: Int32Array;
+  private readonly lastTriple: number;
+  private list: Int32Array | undefined;
+
+  constructor(readonly doc: string) {
+    const n = doc.length;
+    this.space = new Int32Array(n + 1);
+    this.digits = new Int32Array(n + 1);
+    this.body = new Int32Array(n + 2).fill(-1);
+    this.space[n] = n;
+    this.digits[n] = n;
+    for (let i = n - 1; i >= 0; i--) {
+      const c = doc.charCodeAt(i);
+      this.space[i] = isSpaceCode(c) ? this.space[i + 1]! : i;
+      this.digits[i] = isDigitCode(c) ? this.digits[i + 1]! : i;
+      if (c === 34) this.body[i] = i + 1;
+      else if (c === 92) this.body[i] = i + 1 < n && isDot(doc.charCodeAt(i + 1)) ? this.body[i + 2]! : -1;
+      else this.body[i] = c === 10 ? -1 : this.body[i + 1]!;
+    }
+    this.lastTriple = doc.lastIndexOf('"""');
+  }
+
+  triple(i: number): boolean {
+    return this.doc.startsWith('"""', i);
+  }
+
+  /** `"""[\s\S]*?"""` at `i` (a `"""` there): the end, or -1. */
+  block(i: number): number {
+    // The last `"""` bounds every search, so a failed one costs nothing.
+    if (i + 3 > this.lastTriple) return -1;
+    return this.doc.indexOf('"""', i + 3) + 3;
+  }
+
+  /** `"(?:[^"\\\n]|\\.)*"(?!")` at `i` (a `"` there): the end, or -1. */
+  string(i: number): number {
+    const end = this.body[i + 1]!;
+    return end >= 0 && this.doc.charCodeAt(end) !== 34 ? end : -1;
+  }
+
+  /** `-?\d+(?![\w.])` at `i`: the end, or -1. */
+  number(i: number): number {
+    const start = this.doc.charCodeAt(i) === 45 ? i + 1 : i;
+    if (!isDigitCode(this.doc.charCodeAt(start))) return -1;
+    const end = this.digits[start]!;
+    const next = this.doc.charCodeAt(end);
+    return isWordCode(next) || next === 46 ? -1 : end;
+  }
+
+  /**
+   * `\[\s*(?:(?:STRING|NUMBER)\s*,?\s*)+\]` at the `[` at `i`, where STRING
+   * and NUMBER are {@link block}/{@link string} and {@link number}: the end, or -1.
+   *
+   * The regex backtracks exponentially over the ways `\s*,?\s*` can split
+   * the spaces between items, but only the longest split can be followed by
+   * an item or `]`. What remains is a choice for block strings: the regex
+   * tries each later `"""` as the end of one, in order, until the rest of the
+   * list matches. So, right to left over the document:
+   * - `item[j]`: where a list whose next item starts at `j` ends, or -1;
+   * - `close[j]`: the same for the first `"""` at or after `j` that ends a
+   *   block string the rest of the list can follow, or -1.
+   */
+  listAt(i: number): number {
+    const item = (this.list ??= this.fillList());
+    const j = this.space[i + 1]!;
+    return j < this.doc.length ? item[j]! : -1;
+  }
+
+  private fillList(): Int32Array {
+    const { doc, space } = this;
+    const n = doc.length;
+    const item = new Int32Array(n + 1).fill(-1);
+    const close = new Int32Array(n + 4).fill(-1);
+    // After an item that ends at `e`: the separator, then `]` or another item.
+    const after = (e: number): number => {
+      let s = space[e]!;
+      if (doc.charCodeAt(s) === 44) s = space[s + 1]!;
+      if (s >= n) return -1;
+      return doc.charCodeAt(s) === 93 ? s + 1 : item[s]!;
+    };
+    for (let j = n - 1; j >= 0; j--) {
+      const c = doc.charCodeAt(j);
+      const triple = this.triple(j);
+      if (triple) item[j] = close[j + 3]!;
+      else if (c === 34) {
+        const e = this.string(j);
+        item[j] = e < 0 ? -1 : after(e);
+      } else if (c === 45 || isDigitCode(c)) {
+        const e = this.number(j);
+        item[j] = e < 0 ? -1 : after(e);
+      }
+      const end = triple ? after(j + 3) : -1;
+      close[j] = end >= 0 ? end : close[j + 1]!;
+    }
+    return item;
+  }
+}
+
+/** A match of {@link graphqlLiftMatches}: the whole match, the argument name, the separator and the literal. */
+export type GraphqlLift = [string, string | undefined, string | undefined, string | undefined] & { index: number };
+
+/**
+ * The matches of the regex model.ts used to read literals with (GQL_LIFT),
+ * `/#[^\n]*|"""[\s\S]*?"""|"(?:[^"\\\n]|\\.)*"|\b([A-Za-z_][A-Za-z0-9_]*)(\s*:\s*)(STRING|NUMBER|\[\s*(?:(?:STRING|NUMBER)\s*,?\s*)+\])/g`
+ * with STRING = `"""[\s\S]*?"""|"(?:[^"\\\n]|\\.)*"(?!")` and NUMBER = `-?\d+(?![\w.])`:
+ * comments, strings, and arguments with a literal value.
+ */
+export function* graphqlLiftMatches(doc: string): Generator<GraphqlLift> {
+  const t = new GraphqlTables(doc);
+  const n = doc.length;
+  const match = (index: number, end: number, arg?: string, sep?: string, lit?: string): GraphqlLift =>
+    Object.assign([doc.slice(index, end), arg, sep, lit] as GraphqlLift, { index });
+  for (let p = 0; p < n; ) {
+    const c = doc.charCodeAt(p);
+    if (c === 35) {
+      const nl = doc.indexOf("\n", p);
+      const end = nl < 0 ? n : nl;
+      yield match(p, end);
+      p = end;
+      continue;
+    }
+    if (c === 34) {
+      const block = t.triple(p) ? t.block(p) : -1;
+      const end = block >= 0 ? block : t.body[p + 1]!;
+      if (end >= 0) {
+        yield match(p, end);
+        p = end;
+      } else p++;
+      continue;
+    }
+    // `\b` before a letter: the start of a name.
+    if (isWordCode(c) && !isDigitCode(c) && (p === 0 || !isWordCode(doc.charCodeAt(p - 1)))) {
+      let q = p + 1;
+      while (q < n && isWordCode(doc.charCodeAt(q))) q++;
+      const colon = t.space[q]!;
+      if (doc.charCodeAt(colon) === 58) {
+        const b = t.space[colon + 1]!;
+        const l = doc.charCodeAt(b);
+        const end =
+          l === 34 ? (t.triple(b) ? t.block(b) : t.string(b)) : l === 91 ? t.listAt(b) : l === 45 || isDigitCode(l) ? t.number(b) : -1;
+        if (end >= 0) {
+          yield match(p, end, doc.slice(p, q), doc.slice(q, b), doc.slice(b, end));
+          p = end;
+          continue;
+        }
+      }
+      // No literal follows: nothing matches inside the name either.
+      p = q;
+      continue;
+    }
+    p++;
+  }
+}
+
+/**
+ * The matches of `/"""[\s\S]*?"""|"(?:[^"\\\n]|\\.)*"(?!")|-?\d+(?![\w.])/g`:
+ * the items of a list literal, as `[start, end]`.
+ */
+export function* graphqlListItems(lit: string): Generator<[number, number]> {
+  const t = new GraphqlTables(lit);
+  for (let p = 0; p < lit.length; ) {
+    const c = lit.charCodeAt(p);
+    const end = c === 34 ? (t.triple(p) ? t.block(p) : t.string(p)) : c === 45 || isDigitCode(c) ? t.number(p) : -1;
+    if (end >= 0) {
+      yield [p, end];
+      p = end;
+    } else p++;
   }
 }
