@@ -6,7 +6,7 @@
  */
 import { filterExchanges, type DropReason, type FilterOptions } from "./filter.js";
 import { isJsonMime, isObject, loadHar, NOT_JSON, parseJson, type Body, type Exchange } from "./har.js";
-import { findFragmentHead, trimLineEnds } from "./linear.js";
+import { findFragmentHead, graphqlTokens, removeHashComments, replaceQuoted, trimLineEnds } from "./linear.js";
 import { emptyShape, observe, observeText, type Shape } from "./infer.js";
 import { assignNames } from "./naming.js";
 import { collectTaint, isDataLike, isIdentity, isIdentityKey, isIdKey, isTainted, scrubberFor, type Taint } from "./leak.js";
@@ -396,10 +396,7 @@ export function graphqlRootFields(doc: string): string[] {
   const fields: string[] = [];
   let depth = 0;
   let parens = 0;
-  const re = /([{}()])|(\.\.\.\s*[A-Za-z_]\w*)|([A-Za-z_]\w*)(\s*:\s*([A-Za-z_]\w*))?|"(?:[^"\\]|\\.)*"/g;
-  re.lastIndex = start;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(doc))) {
+  for (const m of graphqlTokens(doc, start)) {
     if (m[1] === "{") depth++;
     else if (m[1] === "}") {
       if (--depth === 0) break;
@@ -448,7 +445,7 @@ function gqlFromObject(body: Record<string, any>, path: string, viaGet: boolean)
  * Strings and block strings are kept as they are.
  */
 export function withoutComments(doc: string): string {
-  return trimLineEnds(doc.replace(/"""[\s\S]*?"""|"(?:[^"\\\n]|\\.)*"|#[^\n\r]*/g, (m) => (m.startsWith("#") ? "" : m)));
+  return trimLineEnds(removeHashComments(doc));
 }
 
 /** The document without its fragment definitions (they may precede the operation). */
@@ -541,7 +538,7 @@ function liftGraphQLLiterals(doc: string, variables: unknown): { query: string; 
   });
   if (!defs.length) return { query: doc, variables, names };
   const query = insertVariableDefinitions(body, defs);
-  if (query === undefined) return { query: doc.replace(/"(?:[^"\\\n]|\\.)*"/g, (s) => (isDataLike(s.slice(1, -1)) ? JSON.stringify(REDACTED) : s)), variables, names: [] };
+  if (query === undefined) return { query: replaceQuoted(doc, (s) => (isDataLike(s.slice(1, -1)) ? JSON.stringify(REDACTED) : s)), variables, names: [] };
   return { query, variables: { ...(isObject(variables) ? variables : {}), ...values }, names };
 }
 

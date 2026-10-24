@@ -16,7 +16,7 @@
  */
 import type { Exchange } from "./har.js";
 import { isObject } from "./har.js";
-import { replacePercentRuns } from "./linear.js";
+import { graphqlLiteralMatches, quotedStrings, replacePercentRuns, trimDotsDashesTildes } from "./linear.js";
 import { isContactName, isDataKey, isEmail, isPersonalName, isSecretValue, isSensitiveName, Scrubber } from "./redact.js";
 import { singular, words } from "./words.js";
 
@@ -525,12 +525,12 @@ function mapJsonish(text: string, fn: (value: string | number, key: string | und
 
 /** String literals (block strings too) and long numbers inside a GraphQL document. */
 function graphqlLiterals(doc: string, c: TaintCollector): void {
-  for (const m of doc.matchAll(/#[^\n]*|(?:\b([A-Za-z_]\w*)\s*:\s*)?(?:"""([\s\S]*?)"""|"((?:[^"\\\n]|\\.)*)"|(?<![\w$.])(-?\d{6,})(?![\w.]))/g)) {
+  for (const m of graphqlLiteralMatches(doc)) {
     // `login: "mdemir"`: the argument name says what the value is.
     const identity = !!m[1] && (isIdentityKey(m[1]) || isIdKey(m[1]));
     if (m[0].startsWith("#")) {
       // Comments stay in the document: anything data-like in them is data.
-      for (const q of m[0].matchAll(/"((?:[^"\\\n]|\\.)*)"/g)) c.addAlways(q[1]!);
+      for (const [start, end] of quotedStrings(m[0])) c.addAlways(m[0].slice(start + 1, end - 1));
       for (const w of m[0].match(/[^\s"'<>,;()[\]{}]{4,}/g) ?? []) if (isDataLike(w)) c.add(w);
     } else if (m[2] !== undefined) c.addAlways(m[2].trim(), identity);
     else if (m[3] !== undefined) c.addAlways(m[3], identity);
@@ -632,7 +632,7 @@ function index(text: string, taint: Taint): { tokens: Set<string>; grams: Set<st
   const pieces = new Set<string>();
   for (const raw of text.split(TOKEN_SPLIT)) {
     if (!raw) continue;
-    const t = raw.replace(/^[.\-~]+|[.\-~]+$/g, "").toLowerCase();
+    const t = trimDotsDashesTildes(raw).toLowerCase();
     if (!t || tokens.has(t)) continue;
     tokens.add(t);
     if (!taint.allowed.has(t) && !hostLabels(taint).has(t)) for (const p of t.split(/[._+\-~%@]+/)) if (p.length >= 3 && p !== t) pieces.add(p);
@@ -697,8 +697,8 @@ export function scanText(input: string, taint: Taint | undefined, where: string,
     if (!parts.length) continue;
     if (
       parts.length === 1
-        ? (tokens.has(parts[0]!.replace(/^[.\-~]+|[.\-~]+$/g, "")) || inPieces(taint, pieces, v)) && lower.includes(v)
-        : parts.every((p) => tokens.has(p.replace(/^[.\-~]+|[.\-~]+$/g, ""))) && lower.includes(v)
+        ? (tokens.has(trimDotsDashesTildes(parts[0]!)) || inPieces(taint, pieces, v)) && lower.includes(v)
+        : parts.every((p) => tokens.has(trimDotsDashesTildes(p))) && lower.includes(v)
     ) {
       found.push({ where, preview: maskPreview(v), kind: "value" });
       hit.add(aliasOf(v));
@@ -736,7 +736,7 @@ export function scrubText(text: string, taint: Taint | undefined): string {
   for (const v of recordedValues(taint)) {
     if (taint.allowed.has(v)) continue;
     const parts = v.split(TOKEN_SPLIT).filter(Boolean);
-    if (parts.length && (parts.every((p) => tokens.has(p.replace(/^[.\-~]+|[.\-~]+$/g, ""))) || (parts.length === 1 && inPieces(taint, pieces, v))) && lower.includes(v)) findings.add(v);
+    if (parts.length && (parts.every((p) => tokens.has(trimDotsDashesTildes(p))) || (parts.length === 1 && inPieces(taint, pieces, v))) && lower.includes(v)) findings.add(v);
   }
   for (const t of tokens) if (/[._\-]/.test(t) && !taint.allowed.has(t) && !hostLabels(taint).has(t) && taint.identityForms.has(aliasOf(t))) findings.add(t);
   // Longest first, so "a b c" is replaced before "a b".
