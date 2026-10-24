@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.6.5
+
+Regexes that CodeQL flagged as polynomial, and one that was exponential, are replaced with linear code. A crafted capture could make the CLI, the MCP server or the mock take seconds or minutes; nothing leaked and no code ran. Output is unchanged: every replacement is compared with the code it replaces on 3,000 generated inputs, and `test/fixtures/demo-snapshot.json` is unchanged.
+
+**Slow inputs**
+- GraphQL documents: spaces before the last character of a document (`withoutComments`: 100 KB took 17 s) and a fragment head with no `{` after it (`withoutFragments`: 100 KB, about 5 s, also from a GraphQL request to the running mock) (#7).
+- GraphQL strings: a string that doesn't close, made of escaped quotes (`"\"\"\"…`), was scanned again from every escaped quote, in `model.ts` and `leak.ts` (a 200 KB capture: 27 s) (#10, #11).
+- A GraphQL list argument that doesn't close (`ids: [1  1  1 …`) was exponential in `liftGraphQLLiterals`: 60 bytes took 29 s, and each further item doubled it (#11).
+- The leak guard's tokens: trimming `.`, `-` and `~` from a token scanned a run of them again from each character (`scanText` and `scrubText` on a 200 KB token: about 25 s) (#10).
+- Replaced as a precaution: trailing slashes (`plan.ts`, `openapi.ts`), percent-encoded runs (`leak.ts`) and the JSON fence in a pasted reply (`annotations.ts`) were quadratic in isolation but not reached slowly from any capture we built; the relative-link cut (`redact.ts`) was flagged but was already linear (#7).
+
+**CI**
+- `ci.yml` gives its token read-only access (`permissions: contents: read`) (#7).
+
+**Dependencies**
+- fast-uri 3.1.8 → 3.1.9 (#8) and body-parser 2.3.0 → 2.4.0 (#9): lockfile updates to dependencies of `@modelcontextprotocol/sdk`.
+
+**Tests**
+- `test/review9.test.ts` (G1–G7) and `test/review10.test.ts` (H1–H12): each replacement has an attack input with a time limit and a generated comparison with the original on 3,000 inputs. The replacements are in `src/linear.ts`.
+
 ## 0.6.4
 
 A privacy fix in the mock's fake data, an Auth section in the README, and tests that pin both.
