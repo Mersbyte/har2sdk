@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.6
 
 Fixes from an eleventh review, before launch. Every finding has a test in `test/review11.test.ts` (I1–I3) with a generated variant; the 1,000-seed privacy run passes and `test/fixtures/demo-snapshot.json` is unchanged.
 
@@ -13,7 +13,7 @@ Fixes from an eleventh review, before launch. Every finding has a test in `test/
 - The faker tested the whole value against a hex pattern once per character: a 64 KB value under an id key took 6.5 s to generate from. The test now runs once per value.
 
 **Tests**
-- `test/privacy-fuzz.test.ts` gives each seed 60 s instead of vitest's 5 s default: every seed runs the CLI and an MCP session as child processes, and under the parallel full suite the first seeds could time out on a loaded machine.
+- `test/privacy-fuzz.test.ts` gives each seed 60 s instead of vitest's 5 s default, and so does the MCP test that starts the real binary: they run the CLI and an MCP server as child processes, and under the parallel full suite they could time out on a loaded machine.
 
 ## 0.6.5
 
