@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.7
+
+Fixes from a twelfth review, before launch. Every finding has a test in `test/review12.test.ts` (L1–L4) with a generated variant; the 1,000-seed privacy run passes and `test/fixtures/demo-snapshot.json` is unchanged. The review also found leaks this release does not fix; they are listed in SECURITY.md, *Limits*, and README, *Limitations*.
+
+**Security**
+- A name recorded in parts was never linked to slugs built from it. With `firstName: "Zeynep"` and `lastName: "Kaya"` in `/me`, the path `/api/v1/profiles/zeynep-kaya/settings` stayed literal: `listZeynepKayaSettings` in `client.ts` and `openapi.json`, the path in the prompt and MCP responses, exit status 0. One-word values of sibling name fields in one object (keys that `isContactName` / `isPersonalName` classify and that name a name: `firstName`, `givenName`, `surname`, `vorname`, `soyad`…) are now joined in both orders with `-`, `_` and nothing, and recorded as identities; the path segment becomes a parameter. `surname` is a personal key now; it wasn't one before (L1).
+- GraphQL decimals were not literals for the leak guard or the lifter, and a short number under an identity argument was not lifted: `orders(customer: 48151) near(lat: 41.0123, lng: 28.9784)` was written to `client.ts` as recorded. The literal scanners (`graphqlLiftMatches`, `graphqlListItems`, `graphqlLiteralMatches`) read decimals now, compared with their regexes (`NUMBER` = ``-?\d+(?:\.\d+)?(?![\w.])``) on 3,000 generated inputs each and timed on 200 KB of dotted digits. Lifting and the guard share one rule (`isGraphqlDataNumber`): an id argument; an identity argument (`customer`, `account`, `owner`…) with three digits or more; an integer of six digits or more; a decimal of five digits or more or under a location argument. Decimals become `Float` variables. The variable type of identity arguments stays `Int` (not `ID`), so a document stays valid where the schema says `Int` (L2).
+- Round 11 taught the guard non-Latin letters but not digits. A phone number or id in Arabic-Indic, Persian, Devanagari or full-width digits (`٠٥٣٢١٢٣٤٥٦٧`, `१२३…`, `１２３…`) in a path stayed a literal, and a dictionary keyed by `"דוד-12"` got that key as a property name where `"david-12"` became `Record<string, T>`. The shape detectors (`isIdShaped`, `isDataLike`, the phone pattern) and `isDataKey` count digits of every script (`\p{Nd}`) and letters of every script in keys (L3).
+
+**Slow inputs**
+- `TypeRegistry.intern` built each type's key from its children's keys, which `JSON.stringify` escaped again at every level, so the key doubled per level of nesting: a 194-byte body nested 26 objects deep threw `Invalid string length` after 1.8 s (22 levels: 0.27 s, 24: 0.61 s). A reference now contributes a short id of its target's key; 26, 40 and 60 levels take about the same time as 1 (L4).
+
+**Docs**
+- README and SECURITY.md say plainly that the leak guard is a heuristic that matches output against the capture, that a clean run is not proof that nothing leaked, and to check `har2sdk inspect` and the generated files before publishing. *Limits* / *Limitations* now list what is still not caught: decorated, invisible-character and NFD variants of a recorded value, a recorded word inside a longer compound name, one-word names used as dictionary keys, names only inside a JWT payload, GraphQL enum literals, aliases and fragment names, and values over 4,000 characters.
+
 ## 0.6.6
 
 Fixes from an eleventh review, before launch. Every finding has a test in `test/review11.test.ts` (I1–I3) with a generated variant; the 1,000-seed privacy run passes and `test/fixtures/demo-snapshot.json` is unchanged.

@@ -308,10 +308,26 @@ export class TypeRegistry {
     return base + n;
   }
 
+  /** A short id per distinct type key: a ref's key names its target by id, so keys don't nest. */
+  private keyIds = new Map<string, number>();
+
+  private keyId(key: string): number {
+    let id = this.keyIds.get(key);
+    if (id === undefined) this.keyIds.set(key, (id = this.keyIds.size));
+    return id;
+  }
+
+  /**
+   * A structural key: equal for equal types. A reference contributes its
+   * target's key id, not the key itself — embedding it (escaped again by
+   * every enclosing level) doubled the key per level of nesting.
+   */
   private typeKey(t: TypeNode): string {
     switch (t.k) {
-      case "ref":
-        return "@" + (this.byName.get(t.name)?.key ?? t.name);
+      case "ref": {
+        const key = this.byName.get(t.name)?.key;
+        return key === undefined ? "@" + t.name : "#" + this.keyId(key);
+      }
       case "array":
         return "[" + this.typeKey(t.items) + "]";
       case "map":

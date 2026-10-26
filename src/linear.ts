@@ -212,15 +212,15 @@ export function* graphqlTokens(doc: string, start: number): Generator<RegExpExec
   }
 }
 
-const GQL_LITERAL = /#[^\n]*|(?:\b([A-Za-z_]\w*)\s*:\s*)?(?:(""")|"|(?<![\w$.])(-?\d{6,})(?![\w.]))/g;
+const GQL_LITERAL = /#[^\n]*|(?:\b([A-Za-z_]\w*)\s*:\s*)?(?:(""")|"|(?<![\w$.])(-?\d+(?:\.\d+)?)(?![\w.]))/g;
 
 /** A match of {@link graphqlLiteralMatches}: the whole match and its four groups. */
 export type GraphqlLiteral = [string, string | undefined, string | undefined, string | undefined, string | undefined] & { index: number };
 
 /**
  * The matches of
- * `/#[^\n]*|(?:\b([A-Za-z_]\w*)\s*:\s*)?(?:"""([\s\S]*?)"""|"((?:[^"\\\n]|\\.)*)"|(?<![\w$.])(-?\d{6,})(?![\w.]))/g`:
- * comments, and string and long number literals with the argument name before them.
+ * `/#[^\n]*|(?:\b([A-Za-z_]\w*)\s*:\s*)?(?:"""([\s\S]*?)"""|"((?:[^"\\\n]|\\.)*)"|(?<![\w$.])(-?\d+(?:\.\d+)?)(?![\w.]))/g`:
+ * comments, and string and number literals (integers and decimals) with the argument name before them.
  */
 export function* graphqlLiteralMatches(doc: string): Generator<GraphqlLiteral> {
   const re = new RegExp(GQL_LITERAL);
@@ -319,11 +319,14 @@ class GraphqlTables {
     return end >= 0 && this.doc.charCodeAt(end) !== 34 ? end : -1;
   }
 
-  /** `-?\d+(?![\w.])` at `i`: the end, or -1. */
+  /** `-?\d+(?:\.\d+)?(?![\w.])` at `i`: the end, or -1. */
   number(i: number): number {
     const start = this.doc.charCodeAt(i) === 45 ? i + 1 : i;
     if (!isDigitCode(this.doc.charCodeAt(start))) return -1;
-    const end = this.digits[start]!;
+    let end = this.digits[start]!;
+    // A decimal (`41.0123`): the fraction's digits, then the same check. Backing
+    // off to the integer part never helps: a `.` follows it.
+    if (this.doc.charCodeAt(end) === 46 && isDigitCode(this.doc.charCodeAt(end + 1))) end = this.digits[end + 1]!;
     const next = this.doc.charCodeAt(end);
     return isWordCode(next) || next === 46 ? -1 : end;
   }
@@ -383,7 +386,7 @@ export type GraphqlLift = [string, string | undefined, string | undefined, strin
 /**
  * The matches of the regex model.ts used to read literals with (GQL_LIFT),
  * `/#[^\n]*|"""[\s\S]*?"""|"(?:[^"\\\n]|\\.)*"|\b([A-Za-z_][A-Za-z0-9_]*)(\s*:\s*)(STRING|NUMBER|\[\s*(?:(?:STRING|NUMBER)\s*,?\s*)+\])/g`
- * with STRING = `"""[\s\S]*?"""|"(?:[^"\\\n]|\\.)*"(?!")` and NUMBER = `-?\d+(?![\w.])`:
+ * with STRING = `"""[\s\S]*?"""|"(?:[^"\\\n]|\\.)*"(?!")` and NUMBER = `-?\d+(?:\.\d+)?(?![\w.])`:
  * comments, strings, and arguments with a literal value.
  */
 export function* graphqlLiftMatches(doc: string): Generator<GraphqlLift> {
@@ -434,7 +437,7 @@ export function* graphqlLiftMatches(doc: string): Generator<GraphqlLift> {
 }
 
 /**
- * The matches of `/"""[\s\S]*?"""|"(?:[^"\\\n]|\\.)*"(?!")|-?\d+(?![\w.])/g`:
+ * The matches of `/"""[\s\S]*?"""|"(?:[^"\\\n]|\\.)*"(?!")|-?\d+(?:\.\d+)?(?![\w.])/g`:
  * the items of a list literal, as `[start, end]`.
  */
 export function* graphqlListItems(lit: string): Generator<[number, number]> {
