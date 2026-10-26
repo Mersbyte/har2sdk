@@ -121,7 +121,7 @@ HAR files contain live session cookies, tokens and often other people's data. ha
 
 The guard is a heuristic with evidence from the capture, not a proof: a value with **no evidence anywhere** (a word used once as a path segment that nothing else names) can't be recognised, and one-word names of things (a category `"Books"`) are treated as vocabulary. Look over `har2sdk inspect` before publishing generated code. Details, and exactly what is and isn't collected: [SECURITY.md](SECURITY.md).
 
-It's tested with the inputs of ten review rounds (`test/review*.test.ts`) and a generated privacy test that builds a random person and hides them in 30 kinds of places in a random capture, then checks every output, including a real MCP session, the CLI's `inspect --json` and every mock response (30 seeds in CI; the long run of 1,000 seeds passes).
+It's tested with the inputs of eleven review rounds (`test/review*.test.ts`) and a generated privacy test that builds a random person and hides them in 30 kinds of places in a random capture, then checks every output, including a real MCP session, the CLI's `inspect --json` and every mock response (30 seeds in CI; the long run of 1,000 seeds passes).
 
 **Treat `.har` files like passwords.** **Use it responsibly:** reverse-engineering an API you don't own can break its terms of use. Good uses: your own apps, legacy internal systems, services you're allowed to integrate with. Please don't publish SDKs for other companies' services.
 

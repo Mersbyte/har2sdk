@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+Fixes from an eleventh review, before launch. Every finding has a test in `test/review11.test.ts` (I1–I3) with a generated variant; the 1,000-seed privacy run passes and `test/fixtures/demo-snapshot.json` is unchanged.
+
+**Security**
+- The fake data of the mock and `--examples` replaced only ASCII letters and digits; every other character was copied. A value in a non-Latin script came back as recorded: a Chinese full name, city, address and a diagnosis (a field under a personal key went through the faker and came back whole), a Cyrillic first name; Latin names with diacritics kept those letters in place. Now every letter, combining mark and number outside ASCII is replaced by one of the same Unicode category, never itself: a decimal digit by another digit of its own set, a letter by one drawn uniformly from the run of its category around it, so the fake doesn't narrow down which character was recorded. A fake keeps the value's shape and usually its script; at a block edge it can cross into a neighbouring script (I1).
+- The leak guard missed most non-Latin names. An identity (a value under `login`, `owner`…) had to contain a Latin letter, and a personal value had to be four UTF-16 characters long, which most Chinese and Korean names are not. A name in a path segment, echoed under `fullName` with an email next to it, was written to `client.ts` and `openapi.json` with exit status 0 and shown in the prompt and MCP responses. Identities, free text of several words and ids mixing letters and digits now count letters of any script (before, each needed an ASCII letter; free text an ASCII letter or digit), and the length thresholds count a letter without case (Unicode category Lo: logograms, syllables, abjad consonants) twice, so "张三" counts as four. Cased alphabets count as before: a three-letter `firstName` such as "Ali" or "Лев" is still not collected (see SECURITY.md, *Limits*) (I2).
+
+**Slow inputs**
+- `redactFreeText`, which every mock text body goes through, used two regexes that rescanned a run of characters from each start: the email pattern (an XML tag name of 128 KB: 26 s per request, blocking the mock) and the URL query-string pattern (`http://a` repeated over 256 KB: 7 s). Both are hand-written scanners in `src/linear.ts` now, compared with the original regexes on 3,000 generated inputs in the tests. On this review's inputs at 200–256 KB, `redactFreeText` takes a few to about 10 milliseconds, and a mock request with a 200 KB tag name stays under the tests' 5 s limit; other slow inputs may remain (I3).
+- The faker tested the whole value against a hex pattern once per character: a 64 KB value under an id key took 6.5 s to generate from. The test now runs once per value.
+
+**Tests**
+- `test/privacy-fuzz.test.ts` gives each seed 60 s instead of vitest's 5 s default: every seed runs the CLI and an MCP session as child processes, and under the parallel full suite the first seeds could time out on a loaded machine.
+
 ## 0.6.5
 
 Regexes that CodeQL flagged as polynomial, and one that was exponential, are replaced with linear code. A crafted capture could make the CLI, the MCP server or the mock take seconds or minutes; nothing leaked and no code ran. Output is unchanged: every replacement is compared with the code it replaces on 3,000 generated inputs, and `test/fixtures/demo-snapshot.json` is unchanged.

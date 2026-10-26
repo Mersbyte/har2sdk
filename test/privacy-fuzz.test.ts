@@ -393,10 +393,13 @@ async function mcpSession(file: string, outDir: string): Promise<string> {
 
 const FROM = Number(process.env.HAR2SDK_FUZZ_FROM ?? 1);
 const SEEDS = Number(process.env.HAR2SDK_FUZZ_SEEDS ?? 30);
+// Each seed runs the CLI and a real MCP session as child processes: seconds each when the
+// whole suite runs in parallel, over vitest's 5 s default on a loaded machine.
+const SLOW = { timeout: 60_000 };
 
 describe(`privacy fuzz (${SEEDS} generated captures, random structure)`, () => {
   for (let seed = FROM; seed < FROM + SEEDS; seed++) {
-    it(`seed ${seed}: no recorded personal value in any output`, async () => {
+    it(`seed ${seed}: no recorded personal value in any output`, SLOW, async () => {
       const { entries, p, sites } = capture(seed);
       const text = har(entries);
       const r = generateFromHar(text);
@@ -428,7 +431,7 @@ describe(`privacy fuzz (${SEEDS} generated captures, random structure)`, () => {
 
 describe(`readable outputs redact what the scanner finds (${SEEDS} generated captures)`, () => {
   for (let seed = FROM; seed < FROM + SEEDS; seed++) {
-    it(`seed ${seed}: slugs, host names and encoded forms of a name are redacted where the files are refused`, async () => {
+    it(`seed ${seed}: slugs, host names and encoded forms of a name are redacted where the files are refused`, SLOW, async () => {
       const { entries, p, origin } = capture(seed);
       const r = rng(seed + 1_000_003);
       const name = `${p.first} ${p.last}`;

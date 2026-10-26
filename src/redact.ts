@@ -5,7 +5,7 @@
  * engine (examples in OpenAPI, text handed to an LLM, the chat prompt) goes
  * through these functions first.
  */
-import { withoutQueryOrHash } from "./linear.js";
+import { replaceEmails, stripUrlQueries, withoutQueryOrHash } from "./linear.js";
 import { setOwn, words } from "./words.js";
 
 export const REDACTED = "<redacted>";
@@ -317,9 +317,7 @@ export function isPersonalName(name: string): boolean {
  * token-looking words.
  */
 export function redactFreeText(text: string): string {
-  return text
-    .replace(/[^\s@"'<>,;]+@[^\s@"'<>,;]+\.[A-Za-z]{2,}/g, "user@example.com")
-    .replace(/(https?:\/\/[^\s?#"'<>]+)[?#][^\s"'<>]*/gi, "$1")
+  return stripUrlQueries(replaceEmails(text, "user@example.com"))
     .replace(/\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]{4}){3,7}(?:[ ]?[A-Z0-9]{1,3})?\b/g, REDACTED)
     .replace(/\+?\d[\d ().-]{8,}\d/g, (m) => (m.replace(/\D/g, "").length >= 7 ? REDACTED : m))
     .replace(/\b\d{6,}\b/g, REDACTED)
@@ -557,14 +555,17 @@ export class Scrubber {
       return h >>> 0;
     };
     const rest = v.slice(prefix.length);
+    // Tested once: inside the loop it rescanned the whole value for every character (quadratic).
+    const hex = /^[0-9a-f-]+$/i.test(v);
     const draw = () =>
       [...rest]
         .map((ch, i) => {
           if (/[0-9]/.test(ch)) return String((next() % 9) + (i === 0 ? 1 : 0));
-          if (/[a-f]/.test(ch) && /^[0-9a-f-]+$/i.test(v)) return "abcdef"[next() % 6]!;
+          if (/[a-f]/.test(ch) && hex) return "abcdef"[next() % 6]!;
           if (/[a-z]/.test(ch)) return String.fromCharCode(97 + (next() % 26));
           if (/[A-Z]/.test(ch)) return String.fromCharCode(65 + (next() % 26));
-          return ch;
+          // Outside ASCII: letters, marks and digits of every script ("Ölçü", "王小明", "٤٢").
+          return ch.charCodeAt(0) < 0x80 ? ch : fakeChar(ch, i === 0, next);
         })
         .join("");
     // Drew the recorded value itself: draw again from the same stream. Never derive the
@@ -583,6 +584,81 @@ export class Scrubber {
   private fakeEmail(v: string): string {
     return `user.${this.fake(v.toLowerCase()).replace(/[^a-z0-9]/gi, "").slice(0, 6).toLowerCase()}@example.com`;
   }
+}
+
+/**
+ * Unicode general categories a fake replaces outside ASCII: letters, marks
+ * (vowel signs, combining accents) and numbers. Punctuation, symbols and
+ * spaces are structure and stay.
+ */
+const FAKED_CATEGORIES = ["Nd", "Lu", "Ll", "Lt", "Lm", "Lo", "Mn", "Mc", "Me", "Nl", "No"].map((c) => [c, new RegExp(`^\\p{${c}}$`, "u")] as const);
+
+/**
+ * A character other than `ch` of the same Unicode category, for a character
+ * outside ASCII; `ch` itself if it is not a letter, mark or number. A decimal
+ * digit becomes another digit of its own set (٤ → ٧, never ٤; never a leading
+ * zero). A letter or mark becomes one drawn uniformly from the run of code
+ * points of its category around it (Lo → Lo, Ll → Ll). The fake keeps its
+ * shape, and usually its script: a run is mostly one script's letters, but it
+ * can cross a block edge ("И" may become Greek "Ͽ"). A uniform draw says
+ * nothing about which character was recorded (a draw from near neighbours
+ * would narrow a surname down to a handful). Judged by category, not by a
+ * list of scripts.
+ */
+function fakeChar(ch: string, first: boolean, next: () => number): string {
+  const re = FAKED_CATEGORIES.find(([, r]) => r.test(ch))?.[1];
+  if (!re) return ch;
+  const cp = ch.codePointAt(0)!;
+  if (re === FAKED_CATEGORIES[0]![1]) {
+    // Decimal digits come in runs of ten (0–9), and runs can be adjacent: count back to the first.
+    let start = cp;
+    while (cp - start < 10 * 64 && re.test(String.fromCodePoint(start - 1))) start--;
+    const value = (cp - start) % 10;
+    const choices = [...Array(10).keys()].filter((d) => d !== value && !(first && d === 0));
+    return String.fromCodePoint(cp - value + choices[next() % choices.length]!);
+  }
+  const [lo, hi] = categoryRun(cp, re);
+  if (hi > lo) {
+    const c = lo + (next() % (hi - lo));
+    return String.fromCodePoint(c >= cp ? c + 1 : c);
+  }
+  // Alone in its run (cased alphabets alternate Ş ş Š š; modifier letters stand alone): one of
+  // the nearest characters of its category.
+  const near = nearest(cp, re);
+  if (near.length) return String.fromCodePoint(near[next() % near.length]!);
+  // None within reach (a lone fraction or modifier sign): ASCII of the same kind, still never `ch`.
+  if (/^\p{N}$/u.test(ch)) return String((next() % 9) + 1);
+  return String.fromCharCode((/^\p{Lu}$/u.test(ch) ? 65 : 97) + (next() % 26));
+}
+
+const NEAREST = new Map<number, number[]>();
+
+/** Up to 32 code points of `re`'s category nearest to `cp` (outside ASCII, at most 1,024 away), memoised. */
+function nearest(cp: number, re: RegExp): number[] {
+  let out = NEAREST.get(cp);
+  if (out) return out;
+  out = [];
+  for (let d = 1; d <= 1024 && out.length < 32; d++) {
+    for (const c of [cp - d, cp + d]) if (c >= 0x80 && c <= 0x10ffff && !(c >= 0xd800 && c <= 0xdfff) && re.test(String.fromCodePoint(c))) out.push(c);
+  }
+  if (NEAREST.size > 5000) NEAREST.clear();
+  NEAREST.set(cp, out);
+  return out;
+}
+
+/** Runs found so far: a long text in one script reads its block once, not once per character. */
+const RUNS: [lo: number, hi: number, re: RegExp][] = [];
+const MAX_RUN_REACH = 4096;
+
+/** The contiguous code points around `cp` (outside ASCII, at most 4,096 each way) that `re` matches. */
+function categoryRun(cp: number, re: RegExp): [number, number] {
+  for (const [lo, hi, r] of RUNS) if (r === re && cp >= lo && cp <= hi) return [lo, hi];
+  let lo = cp;
+  let hi = cp;
+  while (cp - lo < MAX_RUN_REACH && lo - 1 >= 0x80 && re.test(String.fromCodePoint(lo - 1))) lo--;
+  while (hi - cp < MAX_RUN_REACH && hi + 1 <= 0x10ffff && re.test(String.fromCodePoint(hi + 1))) hi++;
+  if (RUNS.length < 512) RUNS.push([lo, hi, re]);
+  return [lo, hi];
 }
 
 /** Keys whose value names a type: "__typename": "Product", "kind": "OrganizationMember". */
