@@ -89,7 +89,8 @@ describe("MCP server", () => {
 });
 
 describe("MCP over stdio (the real binary)", () => {
-  it("starts with `har2sdk mcp` and answers tools/list", async () => {
+  // A child process: seconds under the parallel suite on a loaded machine, over vitest's 5 s default.
+  it("starts with `har2sdk mcp` and answers tools/list", { timeout: 60_000 }, async () => {
     const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
     const { ROOT } = await import("./helpers.js");
     const transport = new StdioClientTransport({ command: process.execPath, args: [join(ROOT, "dist/cli.js"), "mcp"], stderr: "ignore" });

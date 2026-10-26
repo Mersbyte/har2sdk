@@ -6,7 +6,7 @@ import type { Plan, PlannedOp, PlannedParam } from "./plan.js";
 import { printTs, printTsInterface, type TypeNode } from "./types.js";
 import { propertyKey } from "./words.js";
 
-export const VERSION = "0.6.5";
+export const VERSION = "0.6.6";
 
 export function generateTypeScript(plan: Plan): string {
   const { model, clientName, ops } = plan;

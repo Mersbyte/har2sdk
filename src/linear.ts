@@ -448,3 +448,91 @@ export function* graphqlListItems(lit: string): Generator<[number, number]> {
     } else p++;
   }
 }
+
+/** The characters `[^\s@"'<>,;]` matches (without the u flag). */
+const isEmailCode = (c: number) => !isSpaceCode(c) && c !== 64 && c !== 34 && c !== 39 && c !== 60 && c !== 62 && c !== 44 && c !== 59;
+const isAsciiLetterCode = (c: number) => (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+
+/**
+ * `text.replace(/[^\s@"'<>,;]+@[^\s@"'<>,;]+\.[A-Za-z]{2,}/g, replacement)`.
+ * The regex tried every start inside a run of the class and scanned to its end
+ * each time (128 KB of one run: 26 s in the mock). Here a run is read once:
+ * every start in it ends at the same place, so they all match or all fail.
+ * - The local part can't backtrack: `@` is outside the class, so it is the
+ *   whole rest of the run and the run must end in `@`.
+ * - After the `@`, the greedy domain gives back characters until `\.` and two
+ *   letters follow: the last `.` in the domain's run with two letters after it
+ *   and at least one character before it. The letters then run as far as they go.
+ * - If there is no such `.`, the next start the regex tries is just after the `@`.
+ */
+export function replaceEmails(text: string, replacement: string): string {
+  const n = text.length;
+  let out = "";
+  let copied = 0;
+  let i = 0;
+  while (i < n) {
+    if (!isEmailCode(text.charCodeAt(i))) {
+      i++;
+      continue;
+    }
+    let at = i;
+    while (at < n && isEmailCode(text.charCodeAt(at))) at++;
+    if (at >= n || text.charCodeAt(at) !== 64) {
+      i = at;
+      continue;
+    }
+    const domain = at + 1;
+    let domainEnd = domain;
+    while (domainEnd < n && isEmailCode(text.charCodeAt(domainEnd))) domainEnd++;
+    let dot = -1;
+    for (let j = domainEnd - 3; j > domain; j--) {
+      if (text.charCodeAt(j) === 46 && isAsciiLetterCode(text.charCodeAt(j + 1)) && isAsciiLetterCode(text.charCodeAt(j + 2))) {
+        dot = j;
+        break;
+      }
+    }
+    if (dot < 0) {
+      i = domain;
+      continue;
+    }
+    let end = dot + 1;
+    while (end < n && isAsciiLetterCode(text.charCodeAt(end))) end++;
+    out += text.slice(copied, i) + replacement;
+    copied = end;
+    i = end;
+  }
+  return copied === 0 ? text : out + text.slice(copied);
+}
+
+/** `[^\s?#"'<>]` (a URL before its query) and `[^\s"'<>]` (the query or fragment). */
+const isUrlTailCode = (c: number) => !isSpaceCode(c) && c !== 34 && c !== 39 && c !== 60 && c !== 62;
+const isUrlCode = (c: number) => isUrlTailCode(c) && c !== 63 && c !== 35;
+
+/**
+ * `text.replace(/(https?:\/\/[^\s?#"'<>]+)[?#][^\s"'<>]*\/gi, "$1")`: URLs
+ * without their query string and fragment. The regex scanned to the end of
+ * the run after every `http://` in it ("http://ahttp://a…" 256 KB: 7 s).
+ * The run after `://` can't give anything back (`?` and `#` are outside its
+ * class), so it must end in `?` or `#`; if it doesn't, no `http://` inside it
+ * can match either, and the search resumes where the run ends.
+ */
+export function stripUrlQueries(text: string): string {
+  const scheme = /https?:\/\//gi;
+  const n = text.length;
+  let out = "";
+  let copied = 0;
+  for (let m = scheme.exec(text); m; m = scheme.exec(text)) {
+    const start = m.index + m[0].length;
+    let q = start;
+    while (q < n && isUrlCode(text.charCodeAt(q))) q++;
+    const c = text.charCodeAt(q);
+    if (q > start && (c === 63 || c === 35)) {
+      let end = q + 1;
+      while (end < n && isUrlTailCode(text.charCodeAt(end))) end++;
+      out += text.slice(copied, q);
+      copied = end;
+      scheme.lastIndex = end;
+    } else scheme.lastIndex = Math.max(q, m.index + 1);
+  }
+  return copied === 0 ? text : out + text.slice(copied);
+}

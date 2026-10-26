@@ -169,19 +169,35 @@ const VERSIONISH = /^v?\d+(\.\d+){1,3}([-+][0-9A-Za-z.-]+)?$/i;
 const PHONE = /^\+?[\d\s().-]{7,20}$/;
 
 
+const UNCASED_LETTER = /^\p{Lo}$/u;
+
+/**
+ * Length for the "long enough to be data" thresholds. A letter without case
+ * (\p{Lo}: a logogram, a syllable, a consonant of an abjad) counts twice: in
+ * those scripts two or three letters are a whole name ("李娜", "김민준", "علي"),
+ * where two or three letters of a cased alphabet are not ("Li", "Ali", "Лев").
+ * Judged by Unicode category, so no script is listed; ASCII counts as before.
+ */
+export function dataLength(v: string): number {
+  if (/^[\x00-\x7f]*$/.test(v)) return v.length;
+  let n = 0;
+  for (const ch of v) n += UNCASED_LETTER.test(ch) ? 2 : 1;
+  return n;
+}
+
 /** Does this string look like a recorded datum rather than vocabulary? */
 export function isDataLike(value: string): boolean {
   const v = value.trim();
-  if (v.length < 4 || v.length > 4000) return false;
+  if (dataLength(v) < 4 || v.length > 4000) return false;
   if (VERSIONISH.test(v)) return false;
   if (isEmail(v)) return true;
   if (PHONE.test(v) && v.replace(/\D/g, "").length >= 7) return true;
   if (/^https?:\/\//i.test(v)) return /[?#]/.test(v) || /\d{4,}|@/.test(v);
   // A relative path ("/v1/customers") is the API's own structure, unless it carries an id or a query.
   if (/^\/[^\s]*$/.test(v)) return /[?#@]/.test(v) || v.split("/").some((s) => isIdShaped(s) || /\d{4,}/.test(s) || (s.length >= 16 && /\d/.test(s)));
-  if (/\s/.test(v)) return v.split(/\s+/).filter(Boolean).length >= 2 && /[A-Za-z0-9]/.test(v);
+  if (/\s/.test(v)) return v.split(/\s+/).filter(Boolean).length >= 2 && /[\p{L}\p{N}]/u.test(v);
   if (/^-?\d{6,}$/.test(v) || /^-?\d+\.\d{4,}$/.test(v)) return true;
-  if (v.length >= 5 && /\d/.test(v) && /[A-Za-z]/.test(v)) return true;
+  if (dataLength(v) >= 5 && /\d/.test(v) && /\p{L}/u.test(v)) return true;
   if (looksRandom(v)) return true;
   if (isSecretValue(v)) return true;
   return false;
@@ -264,10 +280,11 @@ export class TaintCollector {
     const v = value.trim();
     if (!v || v.length > 4000) return;
     const lower = v.toLowerCase();
-    const usable = v.length >= 3 && !COMMON.has(lower) && !VERSIONISH.test(v);
-    // Identities: user/tenant names, and string ids ("ACPVVW" under `id`) — whatever they look like.
-    if (usable && (isIdentityKey(key) || keyKind(key) === 2) && !/\s/.test(v) && /[a-z]/i.test(v) && !/^\d{4}-\d{2}/.test(v) && !(!isIdentityKey(key) && /^[A-Z]{2,4}$/.test(v))) this.identity(lower);
-    const personal = v.length >= 4 && usable && keyKind(key) !== 0;
+    const len = dataLength(v);
+    const usable = len >= 3 && !COMMON.has(lower) && !VERSIONISH.test(v);
+    // Identities: user/tenant names, and string ids ("ACPVVW" under `id`) — whatever they look like, in any script.
+    if (usable && (isIdentityKey(key) || keyKind(key) === 2) && !/\s/.test(v) && /\p{L}/u.test(v) && !/^\d{4}-\d{2}/.test(v) && !(!isIdentityKey(key) && /^[A-Z]{2,4}$/.test(v))) this.identity(lower);
+    const personal = len >= 4 && usable && keyKind(key) !== 0;
     // A thing's one-word name (a category "Books", a repository "dotfiles"): a label, not personal data.
     if (personal && !person && nameOnlyKey(key) && !/\s/.test(v) && !isDataLike(v)) {
       this.taint.labels.add(lower);
@@ -296,7 +313,7 @@ export class TaintCollector {
     if (parts.length < 2 || parts.length > 4 || !parts.every((p) => /^\p{L}[\p{L}'’.-]*$/u.test(p))) return;
     for (const p of parts) {
       const w = p.toLowerCase().replace(/[.'’]+$/, "");
-      if (w.length < 3 || COMMON.has(w)) continue;
+      if (dataLength(w) < 3 || COMMON.has(w)) continue;
       this.taint.nameParts.add(w);
       this.taint.nameParts.add(w.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/ı/g, "i"));
     }
@@ -313,9 +330,9 @@ export class TaintCollector {
   addAlways(value: string, identity = false): void {
     const v = value.trim();
     const lower = v.toLowerCase();
-    if (v.length < 3 || COMMON.has(lower) || VERSIONISH.test(v)) return;
+    if (dataLength(v) < 3 || COMMON.has(lower) || VERSIONISH.test(v)) return;
     if (identity) this.identity(lower);
-    if (v.length >= 4) this.taint.values.add(lower);
+    if (dataLength(v) >= 4) this.taint.values.add(lower);
   }
 
   addNumber(n: number, key?: string): void {
@@ -584,7 +601,7 @@ export function isIdentity(taint: Taint | undefined, value: string): boolean {
 
 function* recordedValues(taint: Taint): Iterable<string> {
   yield* taint.values;
-  for (const v of taint.identities) if (v.length >= 4 && !taint.values.has(v)) yield v;
+  for (const v of taint.identities) if (dataLength(v) >= 4 && !taint.values.has(v)) yield v;
 }
 
 export interface LeakFinding {
@@ -635,7 +652,7 @@ function index(text: string, taint: Taint): { tokens: Set<string>; grams: Set<st
     const t = trimDotsDashesTildes(raw).toLowerCase();
     if (!t || tokens.has(t)) continue;
     tokens.add(t);
-    if (!taint.allowed.has(t) && !hostLabels(taint).has(t)) for (const p of t.split(/[._+\-~%@]+/)) if (p.length >= 3 && p !== t) pieces.add(p);
+    if (!taint.allowed.has(t) && !hostLabels(taint).has(t)) for (const p of t.split(/[._+\-~%@]+/)) if (dataLength(p) >= 3 && p !== t) pieces.add(p);
     const w = words(raw).slice(0, 12);
     for (let i = 0; i < w.length; i++) {
       let s = "";
