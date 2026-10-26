@@ -247,6 +247,7 @@ export function isContactName(name: string): boolean {
 const PERSONAL_WORDS = new Set([
   "name",
   "names",
+  "surname",
   "username",
   "user",
   "login",
@@ -310,6 +311,14 @@ export function isPersonalName(name: string): boolean {
   return words(name).some((w) => PERSONAL_WORDS.has(w));
 }
 
+/** Words of a key that holds (part of) a person's name rather than their contact details. */
+const NAME_WORDS = new Set("name names surname first last middle given family display nick nickname isim ad soyad soyadi vorname nachname nombre apellido prenom nom".split(" "));
+
+/** `firstName`, `family_name`, `soyad`, `nachname`: the key names a name. */
+export function isPersonalNameWord(name: string): boolean {
+  return words(name).some((w) => NAME_WORDS.has(w));
+}
+
 /**
  * Mask personal data inside free text (CSV, HTML, plain text, messages):
  * emails, URL query strings (signed URLs carry credentials), IBANs, phone
@@ -328,16 +337,18 @@ export function redactFreeText(text: string): string {
 
 /** "usr_8f3k2l9x", "cus_9s6XKzkN": prefixed ids with at least one digit. */
 const PREFIXED_KEY = /^[A-Za-z]{1,6}_(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{6,}$/;
-const ID_KEY = /^(\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{24})$/i;
+const ID_KEY = /^(\p{Nd}+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{24})$/iu;
 
 const PROPERTYISH = /^([a-z]+\d{0,3}([A-Z][a-z]+\d{0,3})*|([A-Z][a-z]+\d{0,3})+|[a-z]+\d{0,3}([_-][a-z]+\d{0,3})*|[A-Z]+\d{0,3}(_[A-Z]+\d{0,3})*)$/;
 
 /** A key that is a datum (an email, a phone number, an id), not a property name. */
 export function isDataKey(k: string): boolean {
   if (ID_KEY.test(k) || PREFIXED_KEY.test(k) || isEmail(k)) return true;
-  if (/^\+?[\d\s().-]{7,}$/.test(k) && k.replace(/\D/g, "").length >= 7) return true;
+  if (/^\+?[\p{Nd}\s().-]{7,}$/u.test(k) && (k.match(/\p{Nd}/gu) ?? []).length >= 7) return true;
   if (/\s/.test(k.trim())) return true;
-  return k.length >= 5 && /\d/.test(k) && /[A-Za-z]/.test(k) && /^[A-Za-z0-9_.:@-]+$/.test(k) && !PROPERTYISH.test(k);
+  // Digits and letters of any script ("דוד-12", "李娜12"); a letter without case counts twice, as in dataLength.
+  const len = k.length + (k.match(/\p{Lo}/gu) ?? []).length;
+  return len >= 5 && /\p{Nd}/u.test(k) && /\p{L}/u.test(k) && /^[\p{L}\p{M}\p{Nd}_.:@-]+$/u.test(k) && !PROPERTYISH.test(k);
 }
 
 // --- Scrubbing: realistic but fake data for mocks and examples ----------------

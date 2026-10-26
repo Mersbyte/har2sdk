@@ -9,7 +9,7 @@ import { isJsonMime, isObject, loadHar, NOT_JSON, parseJson, type Body, type Exc
 import { findFragmentHead, graphqlListItems, graphqlLiftMatches, graphqlTokens, removeHashComments, replaceQuoted, trimLineEnds } from "./linear.js";
 import { emptyShape, observe, observeText, type Shape } from "./infer.js";
 import { assignNames } from "./naming.js";
-import { collectTaint, isDataLike, isIdentity, isIdentityKey, isIdKey, isTainted, scrubberFor, type Taint } from "./leak.js";
+import { collectTaint, isDataLike, isGraphqlDataNumber, isGraphqlIdArg, isIdentity, isIdentityKey, isIdKey, isTainted, scrubberFor, type Taint } from "./leak.js";
 import { isContactName, isDataKey, isEmail, isPersonalName, isSecretValue, isSensitiveHeader, isSensitiveName, redactScalar, REDACTED, Scrubber } from "./redact.js";
 import { isPlural, setOwn, singular, words } from "./words.js";
 import { splitPath, templatePaths, tokenText, type PathSample, type Token } from "./template.js";
@@ -490,7 +490,7 @@ function liftGraphQLLiterals(doc: string, variables: unknown): { query: string; 
   const defs: string[] = [];
   const names: string[] = [];
   const values: Record<string, unknown> = {};
-  const idArg = (arg: string) => /^(id|ids)$|(Id|_id|Ids|_ids)$/.test(arg) || isIdKey(arg);
+  const idArg = isGraphqlIdArg;
   const scalar = (lit: string): string | number => {
     if (lit.startsWith('"""')) return lit.slice(3, -3).trim();
     if (lit.startsWith('"')) {
@@ -502,8 +502,8 @@ function liftGraphQLLiterals(doc: string, variables: unknown): { query: string; 
     }
     return Number(lit);
   };
-  // Numbers are data when they look like ids: an id argument, or six digits or more.
-  const dataNumber = (arg: string, n: number) => Number.isInteger(n) && (idArg(arg) || String(Math.abs(n)).length >= 6);
+  // Numbers are data when they look like ids or locations: see isGraphqlDataNumber (leak.ts), which the leak guard uses too.
+  const dataNumber = isGraphqlDataNumber;
   const lift = (m: string, arg: string | undefined, sep: string, lit: string): string => {
     if (!arg) return m; // a comment or a string that isn't an argument value
     let value: unknown;
@@ -512,12 +512,13 @@ function liftGraphQLLiterals(doc: string, variables: unknown): { query: string; 
       const items = [...graphqlListItems(lit)].map(([start, end]) => scalar(lit.slice(start, end)));
       if (!items.some((x) => typeof x === "string" || dataNumber(arg, x))) return m;
       value = items;
-      type = `[${items.every((x) => typeof x === "number") ? (idArg(arg) ? "ID" : "Int") : idArg(arg) ? "ID" : "String"}!]`;
+      const numbers = items.every((x) => typeof x === "number");
+      type = `[${numbers ? (idArg(arg) ? "ID" : items.every((x) => Number.isInteger(x)) ? "Int" : "Float") : idArg(arg) ? "ID" : "String"}!]`;
     } else {
       value = scalar(lit);
       if (typeof value === "number") {
         if (!dataNumber(arg, value)) return m;
-        type = idArg(arg) || Math.abs(value) > 2147483647 ? "ID" : "Int";
+        type = !Number.isInteger(value) ? "Float" : idArg(arg) || Math.abs(value) > 2147483647 ? "ID" : "Int";
       } else type = idArg(arg) ? "ID" : "String";
     }
     // Every inline string is lifted: a single word can be sensitive too

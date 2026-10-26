@@ -182,7 +182,8 @@ describe("H3 data-like strings are redacted in linear time when variables can't 
 
 // ── H4 ─────────────────────────────────────────────────────────────────────────
 
-const LITERALS = /#[^\n]*|(?:\b([A-Za-z_]\w*)\s*:\s*)?(?:"""([\s\S]*?)"""|"((?:[^"\\\n]|\\.)*)"|(?<![\w$.])(-?\d{6,})(?![\w.]))/g;
+// Review 12: number literals are every integer and decimal (was: integers of six digits or more).
+const LITERALS = /#[^\n]*|(?:\b([A-Za-z_]\w*)\s*:\s*)?(?:"""([\s\S]*?)"""|"((?:[^"\\\n]|\\.)*)"|(?<![\w$.])(-?\d+(?:\.\d+)?)(?![\w.]))/g;
 
 describe("H4 literals in a GraphQL document are collected in linear time (leak.ts graphqlLiterals)", () => {
   it("a capture with `id: ` and a 200 KB string of escaped quotes that doesn't close", SLOW, () => {
@@ -336,7 +337,8 @@ describe("H10 strings are folded in linear time when two GraphQL documents are c
 // ── H11 ────────────────────────────────────────────────────────────────────────
 
 const LIFT_STRING = String.raw`"""[\s\S]*?"""|"(?:[^"\\\n]|\\.)*"(?!")`;
-const LIFT_NUMBER = String.raw`-?\d+(?![\w.])`;
+// Review 12: decimals too (was `-?\d+(?![\w.])`).
+const LIFT_NUMBER = String.raw`-?\d+(?:\.\d+)?(?![\w.])`;
 /** GQL_LIFT as it was in 0.6.4. */
 const LIFT = new RegExp(
   String.raw`#[^\n]*|"""[\s\S]*?"""|"(?:[^"\\\n]|\\.)*"|\b([A-Za-z_][A-Za-z0-9_]*)(\s*:\s*)(${LIFT_STRING}|${LIFT_NUMBER}|\[\s*(?:(?:${LIFT_STRING}|${LIFT_NUMBER})\s*,?\s*)+\])`,

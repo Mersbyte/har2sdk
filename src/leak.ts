@@ -17,7 +17,7 @@
 import type { Exchange } from "./har.js";
 import { isObject } from "./har.js";
 import { graphqlLiteralMatches, quotedStrings, replacePercentRuns, trimDotsDashesTildes } from "./linear.js";
-import { isContactName, isDataKey, isEmail, isPersonalName, isSecretValue, isSensitiveName, Scrubber } from "./redact.js";
+import { isContactName, isDataKey, isEmail, isPersonalName, isPersonalNameWord, isSecretValue, isSensitiveName, Scrubber } from "./redact.js";
 import { singular, words } from "./words.js";
 
 export interface Taint {
@@ -99,11 +99,12 @@ function identityKey(key: string): boolean {
 export function isIdShaped(value: string): boolean {
   const v = value.trim();
   if (v.length < 4 || VERSIONISH.test(v) || /^v\d+$/i.test(v)) return false;
-  if (isEmail(v) || (PHONE.test(v) && v.replace(/\D/g, "").length >= 7)) return true;
+  if (isEmail(v) || (PHONE.test(v) && digitCount(v) >= 7)) return true;
   // Issue keys: an upper-case project key and a number (PROJ-7, AB-12).
   if (/^[A-Z][A-Z0-9]{1,9}-\d+$/.test(v)) return true;
   if (/^[a-z]+\d{1,2}[a-z]*$/i.test(v) && !/^[A-Z0-9]+$/.test(v)) return false;
-  if ((v.match(/\d/g) ?? []).length >= 3) return true;
+  // Digits of any script: "٠٥٣٢١٢٣٤٥٦٧" and "１２３４" are numbers too.
+  if (digitCount(v) >= 3) return true;
   if (/^[A-Za-z]{1,6}[_-](?=[A-Za-z0-9]*\d)[A-Za-z0-9]{5,}$/.test(v)) return true;
   if (looksRandom(v)) return true;
   return /^[A-Z0-9]{6,}$/.test(v) && /\d/.test(v) && /[A-Z]/.test(v);
@@ -166,7 +167,13 @@ export function looksRandom(value: string): boolean {
 }
 
 const VERSIONISH = /^v?\d+(\.\d+){1,3}([-+][0-9A-Za-z.-]+)?$/i;
-const PHONE = /^\+?[\d\s().-]{7,20}$/;
+/** Decimal digits of any script (\p{Nd}): Arabic-Indic, Devanagari, full-width… as well as 0-9. */
+const PHONE = /^\+?[\p{Nd}\s().-]{7,20}$/u;
+
+/** How many decimal digits, of any script, the value has. */
+export function digitCount(v: string): number {
+  return (v.match(/\p{Nd}/gu) ?? []).length;
+}
 
 
 const UNCASED_LETTER = /^\p{Lo}$/u;
@@ -191,13 +198,13 @@ export function isDataLike(value: string): boolean {
   if (dataLength(v) < 4 || v.length > 4000) return false;
   if (VERSIONISH.test(v)) return false;
   if (isEmail(v)) return true;
-  if (PHONE.test(v) && v.replace(/\D/g, "").length >= 7) return true;
+  if (PHONE.test(v) && digitCount(v) >= 7) return true;
   if (/^https?:\/\//i.test(v)) return /[?#]/.test(v) || /\d{4,}|@/.test(v);
   // A relative path ("/v1/customers") is the API's own structure, unless it carries an id or a query.
   if (/^\/[^\s]*$/.test(v)) return /[?#@]/.test(v) || v.split("/").some((s) => isIdShaped(s) || /\d{4,}/.test(s) || (s.length >= 16 && /\d/.test(s)));
   if (/\s/.test(v)) return v.split(/\s+/).filter(Boolean).length >= 2 && /[\p{L}\p{N}]/u.test(v);
-  if (/^-?\d{6,}$/.test(v) || /^-?\d+\.\d{4,}$/.test(v)) return true;
-  if (dataLength(v) >= 5 && /\d/.test(v) && /\p{L}/u.test(v)) return true;
+  if (/^-?\p{Nd}{6,}$/u.test(v) || /^-?\p{Nd}+\.\p{Nd}{4,}$/u.test(v)) return true;
+  if (dataLength(v) >= 5 && /\p{Nd}/u.test(v) && /\p{L}/u.test(v)) return true;
   if (looksRandom(v)) return true;
   if (isSecretValue(v)) return true;
   return false;
@@ -241,6 +248,11 @@ function nameOnlyKey(key: string | undefined): boolean {
   if (!["name", "names", "title"].includes(w[w.length - 1] ?? "")) return false;
   const rest = w.slice(0, -1).join(" ");
   return !rest || !(isContactName(key) || isPersonalName(rest) || isIdentityKey(key) || isSensitiveName(key) || /birth|national|passport|patient|diagnos/i.test(key));
+}
+
+/** A key that holds (part of) a person's name, not their email, phone or address: `firstName`, `familyName`, `nachname`. */
+function nameFieldKey(k: string): boolean {
+  return (isContactName(k) || isPersonalName(k)) && !nameOnlyKey(k) && !isIdentityKey(k) && !isEmail(k) && isPersonalNameWord(k);
 }
 
 /** Keys and collections that hold people: an object under them describes a person. */
@@ -297,11 +309,35 @@ export class TaintCollector {
     // Only distinctive values: emails, ids with 3+ digits, personal multi-word names.
     // (Recorded before under a neutral key, ?q=Kerem Okafor, doesn't make it less personal now.)
     if (this.aliased.has(lower)) return;
-    const distinctive = isEmail(v) || (v.match(/\d/g) ?? []).length >= 3 || (personal && (/\s/.test(v) || isIdentityKey(key)));
+    const distinctive = isEmail(v) || digitCount(v) >= 3 || (personal && (/\s/.test(v) || isIdentityKey(key)));
     if (!distinctive) return;
     this.aliased.add(lower);
     const a = aliasOf(v);
     if (a.length >= 8) this.taint.aliases.add(a);
+  }
+
+  /**
+   * A name recorded in parts: sibling fields under personal-name keys
+   * (`firstName` + `lastName`, `vorname` + `nachname`…), each one word. An app
+   * builds slugs from the parts ("zeynep-kaya", "zeynep_kaya", "zeynepkaya"),
+   * so their joins are identities, as the words of a multi-word name are.
+   */
+  private joinedNames(obj: Record<string, unknown>): void {
+    const parts: string[] = [];
+    for (const k in obj) {
+      const v = obj[k];
+      if (typeof v !== "string" || !nameFieldKey(k)) continue;
+      const w = v.trim().toLowerCase();
+      if (/^\p{L}[\p{L}\p{M}'’]*$/u.test(w) && dataLength(w) >= 2 && !COMMON.has(w)) parts.push(w);
+      if (parts.length > 4) return;
+    }
+    for (let i = 0; i < parts.length; i++)
+      for (let j = 0; j < parts.length; j++) {
+        if (i === j || parts[i] === parts[j]) continue;
+        for (const sep of ["-", "_", ""]) this.identity(parts[i] + sep + parts[j]);
+        const a = aliasOf(parts[i]! + " " + parts[j]!);
+        if (a.length >= 8) this.taint.aliases.add(a);
+      }
   }
 
   /** Values whose identifier form was already decided. */
@@ -352,6 +388,7 @@ export class TaintCollector {
     else if (Array.isArray(value)) for (const item of value.slice(0, 2000)) this.json(item, key, depth + 1, skip, person);
     else if (isObject(value)) {
       const here = person || personObject(value);
+      this.joinedNames(value);
       for (const [k, v] of Object.entries(value)) {
         if (skip?.(k, depth)) continue;
         if (isDataKey(k)) this.add(k, "key");
@@ -551,8 +588,30 @@ function graphqlLiterals(doc: string, c: TaintCollector): void {
       for (const w of m[0].match(/[^\s"'<>,;()[\]{}]{4,}/g) ?? []) if (isDataLike(w)) c.add(w);
     } else if (m[2] !== undefined) c.addAlways(m[2].trim(), identity);
     else if (m[3] !== undefined) c.addAlways(m[3], identity);
-    else if (m[4] !== undefined) c.addNumber(Number(m[4]));
+    else if (m[4] !== undefined && isGraphqlDataNumber(m[1], Number(m[4])) && digitCount(m[4]) >= 4) c.taint.values.add(m[4].toLowerCase());
   }
+}
+
+/** A GraphQL argument that names a thing by id (`id`, `userId`, `orderNumber`). */
+export function isGraphqlIdArg(arg: string): boolean {
+  return /^(id|ids)$|(Id|_id|Ids|_ids)$/.test(arg) || isIdKey(arg);
+}
+
+/**
+ * Is this inline number in a GraphQL document data (lifted into a variable,
+ * and recorded by the leak guard) rather than query logic (`first: 20`)?
+ * Under an id argument always; under an identity argument (`customer`,
+ * `account`, `owner`) with three digits or more; elsewhere an integer of six
+ * digits or more, or a decimal of five digits or more or under a location or
+ * contact argument (`lat: 41.0123`).
+ */
+export function isGraphqlDataNumber(arg: string | undefined, n: number): boolean {
+  if (!Number.isFinite(n)) return false;
+  const digits = String(Math.abs(n)).replace(/[.e+-]/g, "").length;
+  if (arg && isGraphqlIdArg(arg)) return true;
+  if (arg && isIdentityKey(arg) && digits >= 3) return true;
+  if (Number.isInteger(n)) return digits >= 6;
+  return digits >= 5 || (!!arg && isContactName(arg));
 }
 
 function graphqlDocs(v: unknown): string[] {
