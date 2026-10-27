@@ -363,7 +363,7 @@ describe("E7 the numbers in README and LAUNCH.md match the repo", () => {
   // The sites, plus the three places every capture has: the profile, the members list and the headers.
   const kinds = [...sites.matchAll(/^ {4}[a-zA-Z]+: \(\) => \{/gm)].length + 3;
   const rounds = readdirSync(join(ROOT, "test")).filter((f) => /^review\d*\.test\.ts$/.test(f)).length;
-  const words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve"];
+  const words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen"];
 
   for (const file of ["README.md", "docs/LAUNCH.md"]) {
     it(file, () => {

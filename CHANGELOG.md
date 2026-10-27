@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.8
+
+Fixes from a thirteenth review, before launch. Every finding has a test in `test/review13.test.ts` (M1–M3) with a generated variant; the 1,000-seed privacy run passes and `test/fixtures/demo-snapshot.json` is unchanged. The review found no launch blocker. Things it found that this release does not fix are listed under *Docs*.
+
+**Security**
+- An email's local part was never an identity. With `{"user":{"email":"okilic@corp.example"}}` in `/api/v1/session` and a request to `/api/v1/people/okilic/calendar`, the path stayed literal: `okilic` was written to `client.ts` (method and type names, the JSDoc path), `openapi.json`, the prompt and MCP responses, exit status 0. Apps commonly reuse the local part as a username (SSO, GitLab, Jira). The local part of every recorded email (without a `+tag`, at least three characters, with a letter) is now an identity, unless it names a role (`info`, `support`, `noreply`, `sales`…) (M1). An existing test that counted the findings of an email in an annotation now sees two (the email and its local part) per file.
+- JSON inside a string field was never read as evidence. `{"payload":"{\"login\":\"okilic\"}"}` in `/api/v1/me` did not make `/api/v1/users/okilic/settings` a template. A string value that is a JSON object or array (up to 200 KB) is parsed and walked like the rest of the body, within the guard's existing 64-level depth limit (M3).
+
+**Slow inputs**
+- `scrubText` (the prompt, MCP responses and `inspect --json`) matched slugs and host names with a regex that retried from every position inside a long run of letters with no separator: 40,000 characters took 3.4 s, and `har2sdk prompt` on a HAR with one 200,000-letter property name took 35 s. A match can only begin where a run begins, so a lookbehind that rules out the other starts doesn't change what matches. Compared with the old regex on 5,000 generated strings locally, and on 3,000 in the tests; the 200,000-letter input now takes about a millisecond (M2).
+
+**Docs**
+- SECURITY.md and README now list the limits of how much of a capture the guard reads for evidence: the first 2,000 items of an array, 64 levels of nesting, the first 200 KB of a text body and the first 5,000 rows of a CSV.
+- Not fixed: an enum is built for any key that contains a word like `status` or `type`, so `hivStatus`, `religionType` or `immigrationStatus` get a union of the recorded values in `client.ts` and the prompt (and `--examples` fills `openapi.json` with them). These are value sets, not tied to a person, but they can be sensitive.
+
 ## 0.6.7
 
 Fixes from a twelfth review, before launch. Every finding has a test in `test/review12.test.ts` (L1–L4) with a generated variant; the 1,000-seed privacy run passes and `test/fixtures/demo-snapshot.json` is unchanged. The review also found leaks this release does not fix; they are listed in SECURITY.md, *Limits*, and README, *Limitations*.

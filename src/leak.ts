@@ -69,6 +69,13 @@ const COMMON = new Set([
   ...IDENTITY_WORDS,
 ]);
 
+/** An email local part that names a role or a mailbox, not a person: never an identity on its own. */
+const ROLE_MAILBOX = new Set(
+  "info support noreply no-reply donotreply do-not-reply help helpdesk contact sales billing hello hi team jobs careers press media abuse security privacy legal postmaster webmaster hostmaster mailer-daemon notifications notification newsletter marketing feedback bugs issues".split(
+    " ",
+  ),
+);
+
 /** Does this key (or header name) hold an identity: a user, an author, a tenant? */
 const IDENTITY_KEY_CACHE = new Map<string, boolean>();
 
@@ -296,6 +303,12 @@ export class TaintCollector {
     const usable = len >= 3 && !COMMON.has(lower) && !VERSIONISH.test(v);
     // Identities: user/tenant names, and string ids ("ACPVVW" under `id`) — whatever they look like, in any script.
     if (usable && (isIdentityKey(key) || keyKind(key) === 2) && !/\s/.test(v) && /\p{L}/u.test(v) && !/^\d{4}-\d{2}/.test(v) && !(!isIdentityKey(key) && /^[A-Z]{2,4}$/.test(v))) this.identity(lower);
+    // An email's local part is often reused as a username elsewhere in the same app
+    // ("okilic@corp.example" → "/people/okilic/…"), whatever key the email sat under.
+    if (isEmail(v)) {
+      const local = lower.slice(0, lower.indexOf("@")).replace(/\+.*$/, "");
+      if (local.length >= 3 && !COMMON.has(local) && !ROLE_MAILBOX.has(local) && /[a-z]/.test(local)) this.identity(local);
+    }
     const personal = len >= 4 && usable && keyKind(key) !== 0;
     // A thing's one-word name (a category "Books", a repository "dotfiles"): a label, not personal data.
     if (personal && !person && nameOnlyKey(key) && !/\s/.test(v) && !isDataLike(v)) {
@@ -383,8 +396,12 @@ export class TaintCollector {
    */
   json(value: unknown, key?: string, depth = 0, skip?: (key: string, depth: number) => boolean, person = false): void {
     if (depth > 64) return;
-    if (typeof value === "string") this.add(value, key, person);
-    else if (typeof value === "number") this.addNumber(value, key);
+    if (typeof value === "string") {
+      this.add(value, key, person);
+      // JSON inside a string field ({"payload":"{\"login\":\"okilic\"}"}): its keys are evidence too.
+      const inner = embeddedJson(value);
+      if (inner !== undefined) this.json(inner, key, depth + 1, skip, person);
+    } else if (typeof value === "number") this.addNumber(value, key);
     else if (Array.isArray(value)) for (const item of value.slice(0, 2000)) this.json(item, key, depth + 1, skip, person);
     else if (isObject(value)) {
       const here = person || personObject(value);
@@ -395,6 +412,20 @@ export class TaintCollector {
         this.json(v, k, depth + 1, skip, here || (typeof v === "object" && v !== null && personWord(k)));
       }
     }
+  }
+}
+
+/** A string that is itself a JSON object or array (up to 200 KB), parsed; undefined for anything else. */
+function embeddedJson(s: string): object | undefined {
+  if (s.length < 2 || s.length > 200_000) return undefined;
+  const first = s.charCodeAt(0);
+  const last = s.charCodeAt(s.length - 1);
+  if (!((first === 123 && last === 125) || (first === 91 && last === 93))) return undefined;
+  try {
+    const v: unknown = JSON.parse(s);
+    return typeof v === "object" && v !== null ? v : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -824,7 +855,10 @@ export function scrubText(text: string, taint: Taint | undefined): string {
     for (const re of values) out = out.replace(re, "<redacted>");
     if (aliasHits.length) {
       // Slugs and host names: the shortest run of pieces that spells the value.
-      out = out.replace(/[\p{L}\p{N}]+(?:[._+\-~@][\p{L}\p{N}]+)+/gu, (tok) => redactRuns(tok, aliasHits));
+      // A match can only start where a run starts (nothing of its own kind precedes it), so the
+      // lookbehind only rules out restarts the engine would have rejected anyway; it stops it from
+      // retrying every position inside one long unseparated run, which was quadratic.
+      out = out.replace(/(?<![\p{L}\p{N}])[\p{L}\p{N}]+(?:[._+\-~@][\p{L}\p{N}]+)+/gu, (tok) => redactRuns(tok, aliasHits));
       // Identifier forms (a type named after an email) become a neutral name.
       out = out.replace(/[A-Za-z_$][A-Za-z0-9_$]*/g, (id) => {
         const flat = words(id).join("");
