@@ -462,7 +462,9 @@ describe("leak guard", () => {
     const r = gen([entry({ url: "https://api.k.test/me", resBody: { email: "kerem@ornek.dev", id: 1 } })], {
       annotations: { endpoints: { "GET /me": { description: "Profile of kerem@ornek.dev" } } },
     });
-    expect(r.leaks.map((l) => l.where).sort()).toEqual(["client.ts", "openapi.json"]);
+    // "kerem" (the email's local part, also an identity now) and the full email are
+    // two distinct findings in the annotation text, each reaching both files.
+    expect(r.leaks.map((l) => l.where).sort()).toEqual(["client.ts", "client.ts", "openapi.json", "openapi.json"]);
     expect(r.leaks[0]!.preview).not.toContain("kerem@ornek.dev");
     expect(r.warnings.join("\n")).toMatch(/Leak guard/);
     expect(r.warnings.join("\n")).not.toContain("kerem@ornek.dev");
