@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.6.9
+
+Fixes from a fourteenth review: an offline source audit with Codex Security (OpenAI's scanner), nine findings (four medium, five low). The scanner validated them by reading the code; each was then reproduced here with the reviewer's input before it was fixed. Tests are in `test/review14.test.ts`, with generated variants. The 1,000-seed privacy run passes and `test/fixtures/demo-snapshot.json` is unchanged.
+
+**Security**
+- A recorded username of three characters (`lee`) or of several parts (`ece_ak`) inside a compound path (`/preferences/remember_lee`) was not found by the leak guard: it needed four characters, or whole parts as separate tokens. The guard now matches an identity (from three characters) as a token or as a run of pieces of a compound token, never inside a longer word (`sleeve` is not `lee`), and the prompt, MCP responses and `inspect --json` also replace the method and type names built from it (`getRememberLee`). The CLI refuses to write the files, like for any other recorded value.
+- A recorded secret that was also the only key of an object (`{"token":"a\"b","catalog":{"a\"b":true}}`) stayed a property name, and the scanner looked for it unescaped while the file had it escaped. A key equal to a secret recorded under a token, password or key field is now a dictionary key, and the scanner and the prompt scrubber also look for values written with backslash escapes.
+- A REST body's `extensions`, `query`, `operationName` and `method` keys were skipped as GraphQL or JSON-RPC metadata, so `{"extensions":{"username":"okilic"}}` was never evidence. They are skipped now only when the body is that kind of envelope (a GraphQL document, `operationName` or `variables`, a persisted-query `extensions`, a `jsonrpc` field).
+- The mock replayed recorded text outside the scrubbed payload in three places: superjson `meta.values` paths (`okilic.since` beside a faked payload key), the parameters of the `Content-Type` header (`profile="…/okilic"`), and unquoted HTML attributes (`value=okilic`). Paths are now faked like the payload's keys, only the media type and its charset are replayed, and unquoted attributes are scrubbed like quoted ones.
+
+**Slow inputs**
+- A property name or file name made of thousands of short pieces (`a_a_a_…`) took cubic time in the prompt renderer (redacting identifier forms) and in the file-name scrubber (6.6 s and 17 s at 1,600 pieces). Both are linear now. A recorded value after a long run of pieces (past the twelfth word) is also found now.
+
+**Behaviour changes**
+- A recorded login of three characters can now make the guard refuse a file that has it as a whole token or compound piece (`bot_x` for a login `bot`); `--allow-leaks` still overrides. Placeholder words (`admin`, `test`, `demo`…) and role mailboxes are not identities.
+- The mock no longer replays `Content-Type` parameters other than `charset`.
+- A REST body with its own `query` or `extensions` field now contributes evidence, so a value in it may turn a path segment into a parameter.
+
+**Docs**
+- SECURITY.md describes the above and the matching limits (a CamelCase name built from a short identity is not reported on its own in `client.ts`; the path literal is).
+- Not fixed, as before: enums for sensitive attributes (`hivStatus`), and the items listed under Limits and Not caught yet.
+
 ## 0.6.8
 
 Fixes from a thirteenth review, before launch. Every finding has a test in `test/review13.test.ts` (M1–M3) with a generated variant; the 1,000-seed privacy run passes and `test/fixtures/demo-snapshot.json` is unchanged. The review found no launch blocker. Things it found that this release does not fix are listed under *Docs*.

@@ -364,6 +364,9 @@ const IDISH = /^[A-Za-z0-9][A-Za-z0-9_.:~-]{0,63}$/;
  * fake every time within one scrubber, so lists and details still line up);
  * everything else — names, free text, emails, URLs' query strings — is masked.
  */
+/** How many pieces of a file name one recorded value may span. */
+const MAX_STEM_PIECES = 12;
+
 export class Scrubber {
   private fakes = new Map<string, string>();
   private salt: Uint8Array<ArrayBuffer>;
@@ -372,6 +375,7 @@ export class Scrubber {
   private alias: ((s: string) => boolean) | undefined;
   private keptHost: ((host: string) => boolean) | undefined;
   private label: ((s: string) => boolean) | undefined;
+  private value: ((s: string) => boolean) | undefined;
 
   /**
    * @param opts.recorded tells whether a string was recorded as data anywhere
@@ -382,7 +386,7 @@ export class Scrubber {
    * @param opts.label tells whether a string is recorded only as the name of a thing (not a dictionary key).
    */
   constructor(
-    opts: { seed?: number; recorded?: (s: string) => boolean; identity?: (s: string) => boolean; alias?: (s: string) => boolean; keptHost?: (host: string) => boolean; label?: (s: string) => boolean } = {},
+    opts: { seed?: number; recorded?: (s: string) => boolean; identity?: (s: string) => boolean; alias?: (s: string) => boolean; keptHost?: (host: string) => boolean; label?: (s: string) => boolean; value?: (s: string) => boolean } = {},
   ) {
     // A random salt per scrubber: fakes can't be reversed by hashing guesses.
     this.salt = new Uint8Array(new ArrayBuffer(16));
@@ -393,11 +397,28 @@ export class Scrubber {
     this.alias = opts.alias;
     this.keptHost = opts.keptHost;
     this.label = opts.label;
+    this.value = opts.value;
   }
 
   /** Recorded as data, used as a user/tenant name, or the slug form of a recorded name. */
   private known(s: string): boolean {
     return !!(this.recorded?.(s) || this.identity?.(s) || this.alias?.(s));
+  }
+
+  /**
+   * A superjson `meta.values` path ("okilic.since"): the segments that are keys of a dictionary keyed by
+   * data are faked exactly like the payload's keys, so the paths still point at the same members.
+   * Segments are separated by "." ("\\." is a dot in a key).
+   */
+  metaPath(path: string): string {
+    const segs = path.split(/(?<!\\)\./);
+    return segs
+      .map((seg) => {
+        const raw = seg.replace(/\\(.)/g, "$1");
+        const data = isEmail(raw) || isDataKey(raw) || this.identity?.(raw) || this.alias?.(raw) || this.value?.(raw) || (this.recorded?.(raw) && !this.label?.(raw));
+        return data ? (isEmail(raw) ? this.fakeEmail(raw) : this.fake(raw)).replace(/[\\.]/g, "\\$&") : seg;
+      })
+      .join(".");
   }
 
   /** @param inRecord the value is a field of a person's record (an object with contact fields). */
@@ -421,7 +442,7 @@ export class Scrubber {
     // same-shaped entries recorded as data): every key is data.
     const sig = (v: unknown) => (isObject(v) ? Object.keys(v as object).sort().join(",") : Array.isArray(v) ? "[]" : typeof v);
     const dict =
-      entries.some(([k]) => isEmail(k) || isDataKey(k) || this.identity?.(k) || this.alias?.(k)) ||
+      entries.some(([k]) => isEmail(k) || isDataKey(k) || this.identity?.(k) || this.alias?.(k) || this.value?.(k)) ||
       (entries.length >= 2 && entries.every(([k, v]) => this.recorded?.(k) && !this.label?.(k) && sig(v) === sig(entries[0]![1])));
     for (const [k, v] of entries) setOwn(out, dict ? (isEmail(k) ? this.fakeEmail(k) : this.fake(k)) : k, this.json(v, k, depth + 1, personal && isObject(v), record));
     return out;
@@ -525,7 +546,9 @@ export class Scrubber {
     for (let i = 0; i < parts.length; i += 2) {
       // The longest run starting here that is a recorded value.
       let end = -1;
-      for (let j = parts.length - 1; j >= i && end < 0; j -= 2) {
+      // (A recorded value spans a few pieces, not hundreds: bounded, so a long run of short pieces
+      // costs linear time, not cubic.)
+      for (let j = Math.min(parts.length - 1, i + 2 * (MAX_STEM_PIECES - 1)); j >= i && end < 0; j -= 2) {
         const run = parts.slice(i, j + 1).join("");
         if (run.length >= 3 && this.known(run)) end = j;
       }

@@ -49,10 +49,15 @@ export interface Taint {
    * of a person's name is not an enum member and the mock fakes it.
    */
   nameParts: Set<string>;
+  /**
+   * Values recorded under a secret-carrying key (`token`, `password`, `apiKey`…), lower-cased. A secret is
+   * never vocabulary: a property named like one is the secret itself, even if it is the object's only key.
+   */
+  secrets: Set<string>;
 }
 
 export function emptyTaint(): Taint {
-  return { values: new Set(), aliases: new Set(), allowed: new Set(), identities: new Set(), identityForms: new Set(), labels: new Set(), nameParts: new Set() };
+  return { values: new Set(), aliases: new Set(), allowed: new Set(), identities: new Set(), identityForms: new Set(), labels: new Set(), nameParts: new Set(), secrets: new Set() };
 }
 
 const IDENTITY_WORDS = new Set(
@@ -301,6 +306,7 @@ export class TaintCollector {
     const lower = v.toLowerCase();
     const len = dataLength(v);
     const usable = len >= 3 && !COMMON.has(lower) && !VERSIONISH.test(v);
+    if (usable && len >= 4 && key && isSensitiveName(key)) this.taint.secrets.add(lower);
     // Identities: user/tenant names, and string ids ("ACPVVW" under `id`) — whatever they look like, in any script.
     if (usable && (isIdentityKey(key) || keyKind(key) === 2) && !/\s/.test(v) && /\p{L}/u.test(v) && !/^\d{4}-\d{2}/.test(v) && !(!isIdentityKey(key) && /^[A-Z]{2,4}$/.test(v))) this.identity(lower);
     // An email's local part is often reused as a username elsewhere in the same app
@@ -394,7 +400,7 @@ export class TaintCollector {
    * Walk a JSON value: leaves are values, and keys that look like data (emails, ids) are values too.
    * @param person whether this value describes a person (from its container or the request path).
    */
-  json(value: unknown, key?: string, depth = 0, skip?: (key: string, depth: number) => boolean, person = false): void {
+  json(value: unknown, key?: string, depth = 0, skip?: (key: string, depth: number, owner: object) => boolean, person = false): void {
     if (depth > 64) return;
     if (typeof value === "string") {
       this.add(value, key, person);
@@ -407,7 +413,7 @@ export class TaintCollector {
       const here = person || personObject(value);
       this.joinedNames(value);
       for (const [k, v] of Object.entries(value)) {
-        if (skip?.(k, depth)) continue;
+        if (skip?.(k, depth, value)) continue;
         if (isDataKey(k)) this.add(k, "key");
         this.json(v, k, depth + 1, skip, here || (typeof v === "object" && v !== null && personWord(k)));
       }
@@ -432,9 +438,38 @@ function embeddedJson(s: string): object | undefined {
 /** Headers whose values are about the browser, not the user or the app. */
 const BROWSER_VALUE_HEADERS = /^(accept|accept-encoding|accept-language|cache-control|connection|content-type|content-length|pragma|priority|te|upgrade-insecure-requests|user-agent|sec-.*|:.*|host|origin|referer|dnt)$/;
 
-/** GraphQL documents, persisted-query hashes and RPC method names are code, not data. */
-function skipProtocolKeys(k: string, depth: number): boolean {
-  return depth === 0 && /^(query|operationName|extensions|jsonrpc|method)$/.test(k);
+/** A GraphQL document ("query { … }", "{ viewer { id } }"), as opposed to a search term sent under the key `query`. */
+function isGraphqlDocument(v: unknown): boolean {
+  return typeof v === "string" && /^\s*(?:\{|(?:query|mutation|subscription|fragment)\b)/.test(v);
+}
+
+/**
+ * GraphQL documents, persisted-query hashes and RPC method names are code, not data, but only in the
+ * envelope that makes them so. A REST body with a `query` (a search term), `extensions` (a metadata
+ * object) or `method` of its own is data like any other: the key alone proves nothing, the keys
+ * beside it do.
+ */
+function skipProtocolKeys(k: string, depth: number, owner: object): boolean {
+  if (depth !== 0) return false;
+  const o = owner as Record<string, unknown>;
+  const graphql = isGraphqlDocument(o.query) || typeof o.operationName === "string" || isObjectLike(o.variables) || (isObjectLike(o.extensions) && "persistedQuery" in (o.extensions as object));
+  switch (k) {
+    case "query":
+      return isGraphqlDocument(o.query);
+    case "operationName":
+    case "extensions":
+      return graphql;
+    case "jsonrpc":
+      return true;
+    case "method":
+      return "jsonrpc" in o;
+    default:
+      return false;
+  }
+}
+
+function isObjectLike(v: unknown): boolean {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
 export function collectTaint(exchanges: Exchange[]): Taint {
@@ -445,7 +480,8 @@ export function collectTaint(exchanges: Exchange[]): Taint {
     for (const [k, v] of ex.query) {
       // GraphQL over GET: the document is code, its inline literals are data.
       if (k === "query") graphqlLiterals(v, c);
-      if (/^(query|operationName|extensions)$/.test(k)) continue;
+      // A GraphQL-over-GET envelope is code; a `query` or `extensions` parameter of a REST call is data.
+      if ((k === "query" && isGraphqlDocument(v)) || k === "operationName" || (k === "extensions" && v.includes("persistedQuery"))) continue;
       // Names can carry data too: ?role[oguz@kilic.dev]=admin
       for (const part of k.split(/[[\]]+/)) if (part && (isDataKey(part) || isDataLike(part))) c.add(part, "key");
       c.add(v, k);
@@ -559,9 +595,10 @@ function mapMarkup(text: string, fn: (value: string | number, key: string | unde
       // Attribute values; namespace declarations are structure.
       // An attribute starts after white space: anchoring there keeps this linear on a
       // tag with a huge run of name characters (no backtracking from every position).
-      return tok.replace(/(\s)([\w:.-]+)(\s*=\s*)(?:"([^"]*)"|'([^']*)')/g, (m, lead: string, attr: string, eq: string, dq?: string, sq?: string) => {
+      // An unquoted value (value=okilic) runs to the next white space or the end of the tag.
+      return tok.replace(/(\s)([\w:.-]+)(\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+?)(?=\s|\/?>|$))/g, (m, lead: string, attr: string, eq: string, dq?: string, sq?: string, bare?: string) => {
         if (/^xmlns(:|$)/.test(attr)) return m;
-        const out = str(fn(decodeEntities(dq ?? sq ?? ""), attr.replace(/^.*:/, ""))).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+        const out = str(fn(decodeEntities(dq ?? sq ?? bare ?? ""), attr.replace(/^.*:/, ""))).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
         return `${lead}${attr}${eq}"${out}"`;
       });
     }
@@ -711,21 +748,47 @@ export function maskPreview(value: string): string {
 }
 
 const TOKEN_SPLIT = /[^\p{L}\p{N}@._+\-~%]+/u;
+/** Where a compound token ("remember_ece_ak", "2.0.0+mdemir") breaks into pieces. */
+const PIECE_SEP = /[._+\-~%@]+/;
+/** How many pieces of one token, and how many in a row, are joined to look for an identity. */
+const MAX_PIECES = 32;
+const MAX_SPAN = 4;
+/** How many words a recorded identifier form may span, and how many words of one token are searched. */
+const MAX_GRAM = 12;
+const MAX_GRAM_WORDS = 256;
 
-/** The text plus its percent-decoded form: a path literal is written encoded ("y%C4%B1lmaz"). */
+/**
+ * The text plus its percent-decoded form (a path literal is written encoded: "y%C4%B1lmaz") and its
+ * backslash-unescaped form (a property key is written escaped: "synthetic\\"secret" for synthetic"secret).
+ */
 function withDecoded(text: string): string {
-  if (!/%[0-9A-Fa-f]{2}/.test(text)) return text;
-  return (
-    text +
-    "\n" +
-    text.replace(/(?:%[0-9A-Fa-f]{2})+/g, (m) => {
-      try {
-        return decodeURIComponent(m);
-      } catch {
-        return m;
-      }
-    })
-  );
+  let out = text;
+  if (/%[0-9A-Fa-f]{2}/.test(text)) {
+    out +=
+      "\n" +
+      text.replace(/(?:%[0-9A-Fa-f]{2})+/g, (m) => {
+        try {
+          return decodeURIComponent(m);
+        } catch {
+          return m;
+        }
+      });
+  }
+  if (text.includes("\\")) out += "\n" + unescapeBackslashes(text);
+  return out;
+}
+
+/** JSON and TypeScript string escapes: \" \\ \n \t \uXXXX \u{X} \xXX; any other "\c" is "c". Linear. */
+function unescapeBackslashes(text: string): string {
+  const simple: Record<string, string> = { n: "\n", t: "\t", r: "\r", b: "\b", f: "\f", v: "\v", "0": "\0" };
+  return text.replace(/\\(?:u\{([0-9a-fA-F]{1,6})\}|u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2})|([\s\S]))/g, (m, brace?: string, u4?: string, x2?: string, ch?: string) => {
+    const hex = brace ?? u4 ?? x2;
+    if (hex !== undefined) {
+      const code = Number.parseInt(hex, 16);
+      return code < 0x110000 ? String.fromCodePoint(code) : m;
+    }
+    return simple[ch!] ?? ch!;
+  });
 }
 
 /**
@@ -733,26 +796,44 @@ function withDecoded(text: string): string {
  * identifier in it, and the pieces of compound tokens ("remember_mdemir",
  * "2.0.0+mdemir") — except the API's own host names, which are meant to appear.
  */
-function index(text: string, taint: Taint): { tokens: Set<string>; grams: Set<string>; pieces: Set<string> } {
+function index(text: string, taint: Taint): { tokens: Set<string>; grams: Set<string>; pieces: Set<string>; spans: Set<string> } {
   const tokens = new Set<string>();
   const grams = new Set<string>();
   const pieces = new Set<string>();
+  const spans = new Set<string>();
   for (const raw of text.split(TOKEN_SPLIT)) {
     if (!raw) continue;
     const t = trimDotsDashesTildes(raw).toLowerCase();
     if (!t || tokens.has(t)) continue;
     tokens.add(t);
-    if (!taint.allowed.has(t) && !hostLabels(taint).has(t)) for (const p of t.split(/[._+\-~%@]+/)) if (dataLength(p) >= 3 && p !== t) pieces.add(p);
-    const w = words(raw).slice(0, 12);
+    if (!taint.allowed.has(t) && !hostLabels(taint).has(t)) {
+      const ps = t.split(PIECE_SEP).filter(Boolean);
+      for (const p of ps) if (dataLength(p) >= 3 && p !== t) pieces.add(p);
+      // Runs of up to MAX_SPAN pieces joined without separators ("remember_ece_ak" → "eceak"): where a
+      // short or multi-part identity hides inside a compound token.
+      if (ps.length > 1) {
+        const n = Math.min(ps.length, MAX_PIECES);
+        for (let i = 0; i < n; i++) {
+          let run = "";
+          for (let j = i; j < n && j < i + MAX_SPAN; j++) {
+            run += ps[j];
+            spans.add(run);
+          }
+        }
+      }
+    }
+    // Runs of up to MAX_GRAM words from any of the first MAX_GRAM_WORDS words (not only from the first
+    // twelve: a value after a long run of short pieces is found too), so the work is linear in the token.
+    const w = words(raw).slice(0, MAX_GRAM_WORDS);
     for (let i = 0; i < w.length; i++) {
       let s = "";
-      for (let j = i; j < w.length; j++) {
+      for (let j = i; j < w.length && j < i + MAX_GRAM; j++) {
         s += w[j];
         if (s.length >= 8) grams.add(s);
       }
     }
   }
-  return { tokens, grams, pieces };
+  return { tokens, grams, pieces, spans };
 }
 
 const LABELS = new WeakMap<Taint, Set<string>>();
@@ -787,15 +868,53 @@ function inPieces(taint: Taint, pieces: Set<string>, v: string): boolean {
   return taint.identities.has(v) && pieces.has(v) && !hostLabels(taint).has(v);
 }
 
+/** An identity as its pieces joined without separators: "ece_ak" → "eceak", "Lee" → "lee". */
+function joinedForm(identity: string): string {
+  return identity.split(PIECE_SEP).filter(Boolean).join("").toLowerCase();
+}
+
+const IDENTITY_FORMS = new WeakMap<Taint, string[]>();
+
+/** The recorded identities (three or more characters) as their pieces joined: "ece_ak" → "eceak". */
+function identityJoinedForms(taint: Taint): string[] {
+  let out = IDENTITY_FORMS.get(taint);
+  if (!out) {
+    const set = new Set<string>();
+    for (const v of taint.identities) {
+      if (taint.allowed.has(v) || hostLabels(taint).has(v)) continue;
+      const f = aliasOf(v);
+      if (f.length >= 3) set.add(f);
+    }
+    out = [...set];
+    IDENTITY_FORMS.set(taint, out);
+  }
+  return out;
+}
+
+/**
+ * Recorded identities (any length from three) that occur as a token or as a run of pieces of a compound
+ * token, unless the capture's own host names or boilerplate account for them.
+ */
+function hiddenIdentities(taint: Taint, tokens: Set<string>, spans: Set<string>): string[] {
+  const out: string[] = [];
+  for (const v of taint.identities) {
+    if (taint.allowed.has(v) || hostLabels(taint).has(v)) continue;
+    const j = joinedForm(v);
+    if (dataLength(j) < 3) continue;
+    if (spans.has(j) || tokens.has(trimDotsDashesTildes(v))) out.push(v);
+  }
+  return out;
+}
+
 /**
  * Find recorded values in an output. Returns one finding per distinct value;
  * whitespace-free values match whole tokens, longer values must occur verbatim.
  */
 export function scanText(input: string, taint: Taint | undefined, where: string, ignore?: Set<string>): LeakFinding[] {
-  if (!taint || (!taint.values.size && !taint.aliases.size)) return [];
+  if (!taint || (!taint.values.size && !taint.aliases.size && !taint.identities.size)) return [];
   const text = withDecoded(input);
   const lower = text.toLowerCase();
-  const { tokens, grams, pieces } = index(text, taint);
+  const { tokens, grams, pieces, spans } = index(text, taint);
   const found: LeakFinding[] = [];
   const hit = new Set<string>();
   for (const v of recordedValues(taint)) {
@@ -810,6 +929,13 @@ export function scanText(input: string, taint: Taint | undefined, where: string,
       found.push({ where, preview: maskPreview(v), kind: "value" });
       hit.add(aliasOf(v));
     }
+  }
+  // An identity of three characters, or of several parts, inside a compound token or as a token of its
+  // own ("remember_lee", "remember_ece_ak"): the checks above need four characters, or whole parts.
+  for (const v of hiddenIdentities(taint, tokens, spans)) {
+    if (ignore?.has(v) || hit.has(aliasOf(v))) continue;
+    hit.add(aliasOf(v));
+    found.push({ where, preview: maskPreview(v), kind: "value" });
   }
   for (const [a, forms] of aliasesIn(taint, grams)) {
     if (hit.has(a) || ignore?.has(a)) continue;
@@ -839,20 +965,35 @@ export function scrubText(text: string, taint: Taint | undefined): string {
   const decoded = withDecoded(text);
   const findings = new Set<string>();
   const lower = decoded.toLowerCase();
-  const { tokens, grams, pieces } = index(decoded, taint);
+  const { tokens, grams, pieces, spans } = index(decoded, taint);
   for (const v of recordedValues(taint)) {
     if (taint.allowed.has(v)) continue;
     const parts = v.split(TOKEN_SPLIT).filter(Boolean);
     if (parts.length && (parts.every((p) => tokens.has(trimDotsDashesTildes(p))) || (parts.length === 1 && inPieces(taint, pieces, v))) && lower.includes(v)) findings.add(v);
   }
   for (const t of tokens) if (/[._\-]/.test(t) && !taint.allowed.has(t) && !hostLabels(taint).has(t) && taint.identityForms.has(aliasOf(t))) findings.add(t);
+  // A value is also redacted as it is written escaped (a property key: synthetic\"secret).
+  for (const v of [...findings]) {
+    const escaped = JSON.stringify(v).slice(1, -1);
+    if (escaped !== v) findings.add(escaped);
+  }
   // Longest first, so "a b c" is replaced before "a b".
   const values = [...findings].sort((a, b) => b.length - a.length).map((v) => new RegExp(escapeRe(v), "gi"));
+  // Identities of three characters or of several parts, as a token or a run of pieces: replaced where
+  // they stand alone between non-letters, never inside a longer word ("sleeve" for "lee").
+  const hidden = hiddenIdentities(taint, tokens, spans)
+    .sort((a, b) => b.length - a.length)
+    .map((v) => new RegExp(`(?<![\\p{L}\\p{N}])${v.split(PIECE_SEP).filter(Boolean).map(escapeRe).join("[._+\\-~%@]*")}(?![\\p{L}\\p{N}])`, "giu"));
+  // Identifier forms ("getRememberLee") of any recorded identity, not only of those whose compound path
+  // is in this very text: a prompt is scrubbed in parts (the endpoint table, then the types).
+  const flatText = lower.replace(/[^\p{L}\p{N}]+/gu, "");
+  const hiddenForms = identityJoinedForms(taint).filter((f) => flatText.includes(f));
   const aliasHits = aliasesIn(taint, grams).flatMap(([, forms]) => forms);
-  if (!values.length && !aliasHits.length) return text;
+  if (!values.length && !aliasHits.length && !hidden.length && !hiddenForms.length) return text;
   const redact = (s: string): string => {
     let out = s;
     for (const re of values) out = out.replace(re, "<redacted>");
+    for (const re of hidden) out = out.replace(re, "<redacted>");
     if (aliasHits.length) {
       // Slugs and host names: the shortest run of pieces that spells the value.
       // A match can only start where a run starts (nothing of its own kind precedes it), so the
@@ -863,6 +1004,23 @@ export function scrubText(text: string, taint: Taint | undefined): string {
       out = out.replace(/[A-Za-z_$][A-Za-z0-9_$]*/g, (id) => {
         const flat = words(id).join("");
         return aliasHits.some((a) => flat.includes(a)) ? "Redacted" : id;
+      });
+    }
+    if (hiddenForms.length) {
+      // The same for a short or multi-part identity, which has to be a whole run of the identifier's words
+      // ("getRememberLee" for "lee", never "sleeve").
+      out = out.replace(/[A-Za-z_$][A-Za-z0-9_$]*/g, (id) => {
+        const ws = words(id);
+        if (ws.length < 2 && !hiddenForms.includes(ws[0] ?? "")) return id;
+        const n = Math.min(ws.length, MAX_PIECES);
+        for (let i = 0; i < n; i++) {
+          let run = "";
+          for (let j = i; j < n && j < i + MAX_SPAN; j++) {
+            run += ws[j];
+            if (hiddenForms.includes(run)) return "Redacted";
+          }
+        }
+        return id;
       });
     }
     return out;
@@ -880,22 +1038,61 @@ export function scrubText(text: string, taint: Taint | undefined): string {
   });
 }
 
-/** Replace, inside "zeynep-ak.s3.amazonaws.com", the pieces that spell a recorded value. */
+/**
+ * Replace, inside "zeynep-ak.s3.amazonaws.com", the pieces that spell a recorded value: the pieces from
+ * the one an occurrence of the value starts in to the one it ends in. The pieces are flattened once and
+ * each alias is looked up in the flat text, so the work is linear in the token (it used to rebuild and
+ * re-split every run of pieces: cubic on a long property name made of short pieces).
+ */
 function redactRuns(tok: string, aliases: string[]): string {
   const parts = tok.split(/([._+\-~@])/);
+  const n = (parts.length + 1) >> 1;
+  let flat = "";
+  const start: number[] = [];
+  for (let i = 0; i < n; i++) {
+    start.push(flat.length);
+    flat += words(parts[i * 2]!).join("");
+  }
+  // The piece a flat offset belongs to (binary search over `start`).
+  const pieceAt = (off: number): number => {
+    let lo = 0;
+    let hi = n - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (start[mid]! <= off) lo = mid;
+      else hi = mid - 1;
+    }
+    return lo;
+  };
+  const diff = new Int32Array(n + 1);
+  let any = false;
+  for (const a of aliases) {
+    if (!a) continue;
+    for (let k = flat.indexOf(a); k >= 0; k = flat.indexOf(a, k + 1)) {
+      diff[pieceAt(k)]!++;
+      diff[pieceAt(k + a.length - 1) + 1]!--;
+      any = true;
+    }
+  }
+  if (!any) return tok;
   const out: string[] = [];
-  for (let i = 0; i < parts.length; i += 2) {
-    let end = -1;
-    for (let j = i; j < parts.length && end < 0; j += 2) {
-      const flat = words(parts.slice(i, j + 1).join("")).join("");
-      if (aliases.some((a) => flat.includes(a))) end = j;
+  let cover = 0;
+  for (let i = 0; i < n; i++) {
+    cover += diff[i]!;
+    if (cover > 0) {
+      // One marker for a whole run of covered pieces; the separator after the run's last piece stays.
+      let end = i;
+      let c = cover;
+      while (end + 1 < n && c + diff[end + 1]! > 0) {
+        end++;
+        c += diff[end]!;
+      }
+      out.push("<redacted>", parts[end * 2 + 1] ?? "");
+      cover = c;
+      i = end;
+    } else {
+      out.push(parts[i * 2]!, parts[i * 2 + 1] ?? "");
     }
-    if (end < 0) {
-      out.push(parts[i]!, parts[i + 1] ?? "");
-      continue;
-    }
-    out.push("<redacted>", parts[end + 1] ?? "");
-    i = end;
   }
   return out.join("");
 }
@@ -912,5 +1109,6 @@ export function scrubberFor(taint: Taint): Scrubber {
     alias: (s) => isAliasRecorded(taint, s),
     keptHost: (h) => taint.allowed.has(h),
     label: (s) => isLabelOnly(taint, s),
+    value: (s) => taint.secrets.has(s.trim().toLowerCase()),
   });
 }
