@@ -7,6 +7,7 @@ import type { Exchange } from "./har.js";
 import { graphqlRootFields, normalizeGraphQL, splitUnits, withoutFragments, type ApiModel, type Endpoint } from "./model.js";
 import { csvRows, mapTextFields, scrubberFor, scrubText, type Taint } from "./leak.js";
 import { redactFreeText, Scrubber } from "./redact.js";
+import { setOwn } from "./words.js";
 import { splitPath, tokenMatches } from "./template.js";
 
 export interface MockOptions {
@@ -84,7 +85,7 @@ export function createMockServer(model: ApiModel, exchanges: Exchange[], opts: M
       return;
     }
 
-    const rpc = answerRpc(candidates, method, url, body, clean);
+    const rpc = answerRpc(candidates, method, url, body, clean, (m) => (redact ? cleanMetaPaths(m, scrubber) : m));
     if (rpc) {
       if (opts.delay) await new Promise((r) => setTimeout(r, opts.delay));
       send(res, 200, "application/json", JSON.stringify(rpc.payload));
@@ -135,6 +136,8 @@ export function createMockServer(model: ApiModel, exchanges: Exchange[], opts: M
     const rb = sample.responseBody;
     let payload = "";
     let contentType = sample.responseHeaders.get("content-type") ?? "application/octet-stream";
+    // A media type's other parameters (profile="https://…/okilic") are replayed text from the capture too.
+    if (redact) contentType = plainMediaType(contentType);
     if (rb?.kind === "json") {
       // GraphQL: this operation's own result, also when it was recorded inside a batch.
       const value = match.ep.graphql ? (recordedGraphql(match, sample) ?? rb.value) : rb.value;
@@ -190,7 +193,7 @@ function pathMatches(c: Candidate, segs: string[]): boolean {
 }
 
 /** Answer JSON-RPC (method in the body) and tRPC (procedure in the path) calls, batched or not. */
-function answerRpc(candidates: Candidate[], method: string, url: URL, body: string, clean: (v: unknown) => unknown): { payload: unknown; ids: string[] } | undefined {
+function answerRpc(candidates: Candidate[], method: string, url: URL, body: string, clean: (v: unknown) => unknown, cleanMeta: (m: Record<string, unknown>) => Record<string, unknown>): { payload: unknown; ids: string[] } | undefined {
   const segs = splitPath(url.pathname);
   // JSON-RPC
   if (method === "POST" && body) {
@@ -222,7 +225,7 @@ function answerRpc(candidates: Candidate[], method: string, url: URL, body: stri
   const answers = found.map((c) => {
     const { output, meta } = recordedOutput(c!);
     // superjson: the type annotations (Dates, Maps…) are structure, not data.
-    return { result: { data: c!.ep.rpc!.superjson ? { json: clean(output), ...(meta ? { meta: { values: meta } } : {}) } : clean(output) } };
+    return { result: { data: c!.ep.rpc!.superjson ? { json: clean(output), ...(meta ? { meta: { values: cleanMeta(meta) } } : {}) } : clean(output) } };
   });
   return { payload: url.searchParams.get("batch") === "1" ? answers : answers[0], ids: found.map((c) => c!.ep.id) };
 }
@@ -345,6 +348,20 @@ function scrubTextBody(raw: string, scrubber: Scrubber, taint: Taint): string {
         .join("");
   }
   return redactFreeText(out);
+}
+
+/** The paths of a superjson `meta.values` map, faked like the payload's keys (see {@link Scrubber.metaPath}). */
+function cleanMetaPaths(meta: Record<string, unknown>, scrubber: Scrubber): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [path, annotation] of Object.entries(meta)) setOwn(out, scrubber.metaPath(path), annotation);
+  return out;
+}
+
+/** "application/json; charset=utf-8; profile=…" → the type and its charset: nothing else of a header is replayed. */
+function plainMediaType(value: string): string {
+  const [type = "", ...params] = value.split(";");
+  const charset = params.map((p) => p.trim()).find((p) => /^charset=[\w.-]+$/i.test(p));
+  return [type.trim(), ...(charset ? [charset] : [])].join("; ");
 }
 
 /** CSV bodies: every cell is scrubbed like a JSON value under its column's name. */

@@ -159,6 +159,9 @@ export class TypeRegistry {
     if (!keys.length) return false;
     // A key that is shaped like data, or that the capture uses as a user/tenant name.
     if (keys.some((k) => isDataKey(k) || isIdentity(this.taint, k) || isAliasRecorded(this.taint, k))) return true;
+    // A key that is, character for character, a secret recorded under a token/password/key field, even when
+    // it is the object's only key. (A key that merely shares a word with a recorded name keeps its property.)
+    if (keys.some((k) => this.taint?.secrets.has(k.trim().toLowerCase()))) return true;
     // A dictionary: 3+ keys whose values are all objects with the same fields, and at
     // least one of those keys is recorded as data elsewhere ({ okilic: {…}, mdemir: {…} }).
     if (keys.length >= 3) {
