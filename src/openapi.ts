@@ -1,6 +1,7 @@
 /** OpenAPI 3.1 emitter, sharing the plan (and named schemas) with the TS SDK. */
 import { VERSION } from "./codegen.js";
 import { trimTrailingSlashes } from "./linear.js";
+import { setOwn } from "./words.js";
 import type { Plan, PlannedOp } from "./plan.js";
 import { namedToJsonSchema, toJsonSchema, type JsonSchema } from "./types.js";
 
@@ -13,7 +14,7 @@ export interface OpenApiOptions {
 export function generateOpenApi(plan: Plan, opts: OpenApiOptions = {}): Record<string, unknown> {
   const { model, registry, ops } = plan;
   const schemas: Record<string, JsonSchema> = {};
-  for (const nt of registry.types) schemas[nt.name] = namedToJsonSchema(nt);
+  for (const nt of registry.types) setOwn(schemas, nt.name, namedToJsonSchema(nt));
 
   const paths: Record<string, Record<string, unknown>> = {};
   const restOps = ops.filter((o) => !o.ep.graphql && !o.ep.rpc);
@@ -21,14 +22,14 @@ export function generateOpenApi(plan: Plan, opts: OpenApiOptions = {}): Record<s
 
   for (const op of restOps) {
     const item = (paths[op.ep.path] ??= {});
-    item[op.ep.method.toLowerCase()] = restOperation(op, opts);
+    putOperation(item, op.ep.method, restOperation(op, opts));
   }
 
   // tRPC procedures each get their own path: /api/trpc/user.byId
   for (const op of ops.filter((o) => o.ep.rpc?.kind === "trpc")) {
     const path = trimTrailingSlashes(op.ep.path) + "/" + op.ep.rpc!.procedure;
     const item = (paths[path] ??= {});
-    item[op.ep.method.toLowerCase()] = trpcOperation(op);
+    putOperation(item, op.ep.method, trpcOperation(op));
   }
 
   // JSON-RPC methods share one URL: one operation, one body variant per method.
@@ -41,7 +42,7 @@ export function generateOpenApi(plan: Plan, opts: OpenApiOptions = {}): Record<s
   for (const group of rpcGroups.values()) {
     const first = group[0]!.ep;
     const item = (paths[first.path] ??= {});
-    item[first.method.toLowerCase()] = jsonRpcOperation(group, rpcIndex++ === 0 ? "jsonRpc" : `jsonRpc${rpcIndex}`);
+    putOperation(item, first.method, jsonRpcOperation(group, rpcIndex++ === 0 ? "jsonRpc" : `jsonRpc${rpcIndex}`));
   }
 
   // All GraphQL operations on one path+method become a single OpenAPI operation.
@@ -54,7 +55,7 @@ export function generateOpenApi(plan: Plan, opts: OpenApiOptions = {}): Record<s
   for (const group of gqlGroups.values()) {
     const first = group[0]!.ep;
     const item = (paths[first.path] ??= {});
-    item[first.method.toLowerCase()] = graphqlOperation(group, gqlIndex++ === 0 ? "graphql" : `graphql${gqlIndex}`);
+    putOperation(item, first.method, graphqlOperation(group, gqlIndex++ === 0 ? "graphql" : `graphql${gqlIndex}`));
   }
 
   const securitySchemes: Record<string, unknown> = {};
@@ -137,7 +138,7 @@ function restOperation(op: PlannedOp, opts: OpenApiOptions): Record<string, unkn
     } else if (r.kind === "text" && r.mimeType) {
       res.content = { [r.mimeType.split(";")[0]!]: { schema: { type: "string" } } };
     }
-    responses[key] = res;
+    setOwn(responses, key, res);
   }
   operation.responses = Object.keys(responses).length ? responses : { default: { description: "No response recorded" } };
   operation["x-har2sdk"] = { observed: ep.count };
@@ -246,4 +247,21 @@ function graphqlOperation(group: PlannedOp[], operationId: string): Record<strin
     })),
     "x-har2sdk": { observed: group.reduce((n, op) => n + op.ep.count, 0) },
   };
+}
+
+/** The operation keys OpenAPI 3.1 allows on a path item. */
+const OPENAPI_METHODS = new Set(["get", "put", "post", "delete", "options", "head", "patch", "trace"]);
+
+/**
+ * Put an operation under its method. A method OpenAPI has no key for (WebDAV's PROPFIND, anything a
+ * capture holds) goes under `x-har2sdk-methods` instead, so the document stays valid.
+ */
+function putOperation(item: Record<string, unknown>, method: string, operation: unknown): void {
+  const m = method.toLowerCase();
+  if (OPENAPI_METHODS.has(m)) {
+    setOwn(item, m, operation);
+    return;
+  }
+  const ext = (item["x-har2sdk-methods"] ??= {}) as Record<string, unknown>;
+  setOwn(ext, method.toUpperCase(), operation);
 }

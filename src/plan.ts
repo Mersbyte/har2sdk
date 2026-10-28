@@ -157,6 +157,9 @@ function planOp(ep: Endpoint, model: ApiModel, registry: TypeRegistry, warnings:
     return { name, wire: q.wireName, type, required: q.required, examples: q.examples };
   });
 
+  if (!/^(GET|PUT|POST|DELETE|OPTIONS|HEAD|PATCH|TRACE)$/.test(ep.method)) {
+    warnings.push(`${ep.id}: OpenAPI has no key for the method ${ep.method.replace(/[^A-Za-z]/g, "").slice(0, 16)}, so openapi.json lists it under \`x-har2sdk-methods\`.`);
+  }
   let body: PlannedOp["body"];
   if (ep.requestBody) {
     const rb = ep.requestBody;

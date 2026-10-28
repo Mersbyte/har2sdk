@@ -9,7 +9,7 @@
  */
 import { isDataKey, mergeShapes, stringEnum, stringFormat, type Shape, type StringFormat } from "./infer.js";
 import { isAliasRecorded, isDataLike, isIdentity, isLabelOnly, isNamePart, isTainted, type Taint } from "./leak.js";
-import { isIdentifier, pascal, propertyKey, singular, words } from "./words.js";
+import { isIdentifier, pascal, propertyKey, setOwn, singular, words } from "./words.js";
 
 export type TypeNode =
   | { k: "unknown" }
@@ -507,7 +507,7 @@ export function namedToJsonSchema(nt: NamedType, refPrefix = "#/components/schem
   const properties: Record<string, JsonSchema> = {};
   const required: string[] = [];
   for (const p of nt.props) {
-    properties[p.name] = toJsonSchema(p.type, refPrefix);
+    setOwn(properties, p.name, toJsonSchema(p.type, refPrefix));
     if (!p.optional) required.push(p.name);
   }
   const s: JsonSchema = { type: "object", properties };
