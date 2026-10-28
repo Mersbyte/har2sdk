@@ -416,7 +416,7 @@ export class Scrubber {
       .map((seg) => {
         const raw = seg.replace(/\\(.)/g, "$1");
         const data = isEmail(raw) || isDataKey(raw) || this.identity?.(raw) || this.alias?.(raw) || this.value?.(raw) || (this.recorded?.(raw) && !this.label?.(raw));
-        return data ? (isEmail(raw) ? this.fakeEmail(raw) : this.fake(raw)).replace(/\./g, "\\.") : seg;
+        return data ? (isEmail(raw) ? this.fakeEmail(raw) : this.fake(raw)).replace(/[\\.]/g, "\\$&") : seg;
       })
       .join(".");
   }
