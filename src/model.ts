@@ -569,14 +569,15 @@ function liftGraphQLLiterals(doc0: string, variables0: unknown): { query: string
 }
 
 /**
- * Remove string, number, list and input-object defaults from the variable definitions of a document's operations
- * (`query Find($login: String = "okilic", $n: Int = 20)` → `query Find($login: String, $n: Int)`).
- * Boolean, null and enum defaults are the API's vocabulary and stay. One pass, linear.
+ * Remove string, number, list and input-object defaults from the variable definitions of a document's
+ * operations (`query Find($login: String = "okilic", $n: Int = 20)` → `query Find($login: String, $n: Int)`),
+ * moving their values into the variables. A default is removed only when it parses as a GraphQL constant;
+ * boolean, null and enum defaults are the API's vocabulary and stay. One pass, linear.
  */
 function stripVariableDefaults(doc: string): { doc: string; values: Record<string, unknown>; names: string[] } {
   const values: Record<string, unknown> = {};
   const names: string[] = [];
-  let out = "";
+  const out: string[] = []; // pieces; whitespace goes in one character at a time so it can be trimmed
   let i = 0;
   let depth = 0; // selection-set braces: definitions only sit outside them
   let parens = 0;
@@ -584,21 +585,15 @@ function stripVariableDefaults(doc: string): { doc: string; values: Record<strin
   while (i < doc.length) {
     const ch = doc[i]!;
     if (ch === '"') {
-      const block = doc.startsWith('"""', i);
-      let j = block ? doc.indexOf('"""', i + 3) : i + 1;
-      if (block) j = j < 0 ? doc.length : j + 3;
-      else {
-        while (j < doc.length && doc[j] !== '"' && doc[j] !== "\n") j += doc[j] === "\\" ? 2 : 1;
-        j = Math.min(j + 1, doc.length);
-      }
-      out += doc.slice(i, j);
+      const j = stringEnd(doc, i);
+      out.push(doc.slice(i, j));
       i = j;
       continue;
     }
     if (ch === "#") {
       const j = doc.indexOf("\n", i);
       const end = j < 0 ? doc.length : j;
-      out += doc.slice(i, end);
+      out.push(doc.slice(i, end));
       i = end;
       continue;
     }
@@ -609,104 +604,128 @@ function stripVariableDefaults(doc: string): { doc: string; values: Record<strin
       parens = Math.max(0, parens - 1);
       current = undefined;
     } else if (ch === "$" && depth === 0 && parens > 0) {
-      current = doc.slice(i + 1).match(/^[A-Za-z_]\w*/)?.[0];
+      current = doc.slice(i + 1, i + 130).match(/^[A-Za-z_]\w*/)?.[0];
     } else if (ch === "=" && depth === 0 && parens > 0 && current) {
-      const rest = doc.slice(i + 1);
-      const lit = literalAt(rest);
-      if (lit) {
-        const name = current;
-        const value = lit.value;
-        if (value !== undefined) {
-          if (value !== null) setOwn(values, name, value);
-          names.push(name);
-          out = out.replace(/\s*$/, "");
-          i = i + 1 + lit.end;
-          current = undefined;
-          continue;
-        }
+      const lit = graphqlConstant(doc, skipIgnored(doc, i + 1));
+      if (lit && lit.liftable) {
+        setOwn(values, current, lit.value);
+        names.push(current);
+        while (out.length && /^\s$/.test(out[out.length - 1]!)) out.pop();
+        i = lit.end;
+        current = undefined;
+        continue;
       }
     }
-    out += ch;
+    out.push(ch);
     i++;
   }
-  return { doc: names.length ? out : doc, values, names };
+  return { doc: names.length ? out.join("") : doc, values, names };
 }
 
+/** The end (exclusive) of the string or block string that starts at `i`; the text's end if it never closes. */
+function stringEnd(doc: string, i: number): number {
+  if (doc.startsWith('"""', i)) {
+    // A block string ends at the first """ that isn't escaped as \""".
+    for (let j = i + 3; j < doc.length; j++) {
+      if (doc[j] === "\\" && doc.startsWith('"""', j + 1)) j += 3;
+      else if (doc.startsWith('"""', j)) return j + 3;
+    }
+    return doc.length;
+  }
+  for (let j = i + 1; j < doc.length; j++) {
+    if (doc[j] === "\\") j++;
+    else if (doc[j] === '"' || doc[j] === "\n") return j + 1;
+  }
+  return doc.length;
+}
+
+/** Skip GraphQL's ignored tokens: white space, line terminators, commas and comments. */
+function skipIgnored(doc: string, i: number): number {
+  while (i < doc.length) {
+    const c = doc[i]!;
+    if (c === " " || c === "\t" || c === "\n" || c === "\r" || c === "," || c === "\uFEFF") i++;
+    else if (c === "#") {
+      const j = doc.indexOf("\n", i);
+      i = j < 0 ? doc.length : j + 1;
+    } else break;
+  }
+  return i;
+}
+
+const MAX_CONST_DEPTH = 32;
+
 /**
- * A string, number, list or input-object literal at the start of `s` (after spaces): its bounds and value
- * (null for an object that doesn't read as JSON: it still leaves the document).
+ * A GraphQL constant value at `i` (spec §2.9: strings, block strings, numbers, booleans, null, enum values,
+ * lists and input objects, with commas and comments ignored): its value, its end, and whether it may move
+ * into the variables (a string, number, list or object; not a boolean, null or enum value at the top).
+ * Undefined when it doesn't parse: the default then stays in the document.
  */
-function literalAt(s: string): { start: number; end: number; value: unknown } | undefined {
-  const start = s.length - s.trimStart().length;
-  const t = s.slice(start);
-  if (t.startsWith('"""')) {
-    const end = t.indexOf('"""', 3);
-    return end < 0 ? undefined : { start, end: start + end + 3, value: t.slice(3, end).trim() };
-  }
-  const str = t.match(/^"(?:[^"\\\n]|\\.)*"/)?.[0];
-  const num = str ? undefined : t.match(/^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?(?![\w.])/)?.[0];
-  if (!str && !num && t.startsWith("{")) {
-    // An input object ({login: "okilic", limit: 5}): up to its balancing brace, outside strings.
-    let depth = 0;
-    let q = false;
-    let j = 0;
-    for (; j < t.length; j++) {
-      const c = t[j]!;
-      if (q) {
-        if (c === "\\") j++;
-        else if (c === '"') q = false;
-      } else if (c === '"') q = true;
-      else if (c === "{" || c === "[") depth++;
-      else if ((c === "}" || c === "]") && --depth === 0) break;
+function graphqlConstant(doc: string, i: number, depth = 0): { value: unknown; end: number; liftable: boolean } | undefined {
+  if (depth > MAX_CONST_DEPTH || i >= doc.length) return undefined;
+  const c = doc[i]!;
+  if (c === '"') {
+    const end = stringEnd(doc, i);
+    const raw = doc.slice(i, end);
+    if (raw.startsWith('"""')) {
+      if (!raw.endsWith('"""') || raw.length < 6) return undefined;
+      return { value: blockStringValue(raw.slice(3, -3)), end, liftable: true };
     }
-    if (j >= t.length) return undefined;
-    const text = t.slice(0, j + 1);
-    // As JSON: keys quoted, bare enum values as strings, optional commas put back.
-    const json = text
-      .replace(/"(?:[^"\\]|\\.)*"|[A-Za-z_]\w*/g, (m) => {
-        if (m.startsWith('"') || /^(true|false|null)$/.test(m)) return m;
-        return JSON.stringify(m);
-      })
-      .replace(/("(?:[^"\\]|\\.)*"|-?\d[\d.eE+-]*|true|false|null|[}\]])\s+(?=["\d{[tfn-])/g, "$1,");
-    let value: unknown;
+    if (!raw.endsWith('"') || raw.length < 2 || raw.endsWith('\n')) return undefined;
     try {
-      value = JSON.parse(json);
-    } catch {
-      value = null; // the default still leaves the document; the call's own variables apply
-    }
-    return { start, end: start + j + 1, value };
-  }
-  if (!str && !num && t.startsWith("[")) {
-    // A list of strings and numbers only (a JSON array once written with commas).
-    let j = 1;
-    let q = false;
-    for (; j < t.length; j++) {
-      const c = t[j]!;
-      if (q) {
-        if (c === "\\") j++;
-        else if (c === '"') q = false;
-      } else if (c === '"') q = true;
-      else if (c === "]") break;
-      else if (c === "[" || c === "{") return undefined;
-    }
-    if (j >= t.length) return undefined;
-    // GraphQL commas are optional: put them back where items are only separated by spaces.
-    const json = t.slice(0, j + 1).replace(/("(?:[^"\\]|\\.)*"|-?\d[\d.eE+-]*)\s+(?=["\d-])/g, "$1,");
-    try {
-      const v = JSON.parse(json);
-      if (Array.isArray(v) && v.every((x) => typeof x === "string" || typeof x === "number")) return { start, end: start + j + 1, value: v };
+      // GraphQL string escapes are JSON's (\uXXXX, \n, \"…), plus \u{…} braces, which JSON lacks.
+      return { value: JSON.parse(raw.replace(/\\u\{([0-9A-Fa-f]{1,6})\}/g, (_m, h: string) => JSON.stringify(String.fromCodePoint(parseInt(h, 16))).slice(1, -1))), end, liftable: true };
     } catch {
       return undefined;
     }
-    return undefined;
   }
-  const lit = str ?? num;
-  if (!lit) return undefined;
-  try {
-    return { start, end: start + lit.length, value: JSON.parse(lit) };
-  } catch {
-    return undefined;
+  const num = doc.slice(i, i + 64).match(/^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/);
+  if (num && !/[\w.]/.test(doc[i + num[0].length] ?? "")) return { value: Number(num[0]), end: i + num[0].length, liftable: true };
+  const name = doc.slice(i, i + 130).match(/^[A-Za-z_]\w*/);
+  if (name) {
+    const w = name[0];
+    const value = w === "true" ? true : w === "false" ? false : w === "null" ? null : w;
+    return { value, end: i + w.length, liftable: false };
   }
+  if (c === "[" || c === "{") {
+    const close = c === "[" ? "]" : "}";
+    const list: unknown[] = [];
+    const obj: Record<string, unknown> = {};
+    let j = skipIgnored(doc, i + 1);
+    while (j < doc.length && doc[j] !== close) {
+      if (c === "{") {
+        const key = doc.slice(j, j + 130).match(/^[A-Za-z_]\w*/)?.[0];
+        if (!key) return undefined;
+        j = skipIgnored(doc, j + key.length);
+        if (doc[j] !== ":") return undefined;
+        const v = graphqlConstant(doc, skipIgnored(doc, j + 1), depth + 1);
+        if (!v) return undefined;
+        setOwn(obj, key, v.value);
+        j = skipIgnored(doc, v.end);
+      } else {
+        const v = graphqlConstant(doc, j, depth + 1);
+        if (!v) return undefined;
+        list.push(v.value);
+        j = skipIgnored(doc, v.end);
+      }
+    }
+    if (doc[j] !== close) return undefined;
+    return { value: c === "[" ? list : obj, end: j + 1, liftable: true };
+  }
+  return undefined;
+}
+
+/** A block string's value (spec §2.9.4, simplified): \""" unescaped, common indentation and blank edge lines removed. */
+function blockStringValue(raw: string): string {
+  const lines = raw.replace(/\\"""/g, '"""').split(/\r\n|\n|\r/);
+  let common: number | undefined;
+  for (const l of lines.slice(1)) {
+    const indent = l.length - l.trimStart().length;
+    if (indent < l.length && (common === undefined || indent < common)) common = indent;
+  }
+  const out = lines.map((l, k) => (k > 0 && common ? l.slice(common) : l));
+  while (out.length && !out[0]!.trim()) out.shift();
+  while (out.length && !out[out.length - 1]!.trim()) out.pop();
+  return out.join("\n");
 }
 
 /** Add `$x: String!` definitions to the (first) operation of a document. */

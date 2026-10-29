@@ -1,6 +1,6 @@
 {
   "name": "har2sdk",
-  "version": "0.6.10",
+  "version": "0.6.11",
   "description": "Turn browser network traffic (HAR) into a typed TypeScript SDK, an OpenAPI 3.1 spec and a mock server. Local, deterministic, no API key. Ships an MCP server so Claude can name and document every endpoint.",
   "keywords": [
     "har",

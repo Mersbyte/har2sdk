@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.11
+
+Fixes from a sixteenth review: a read-only review by Codex of the 0.6.10 changes only (`09d1927..ea7bcd6`), six findings. Each was reproduced here with the reviewer's input before it was fixed. Tests are in `test/review16.test.ts`, with generated variants; 20 of its 24 tests fail on 0.6.10. `test/fixtures/demo-snapshot.json` is unchanged.
+
+**Correctness**
+- A response header that describes the server made its value personal: `X-Service-Name: catalog` next to `GET /api/v1/catalog` (or `X-Powered-By: Express`) made the CLI refuse a normal API (exit 2), new in 0.6.10. A response header now counts as evidence of personal data only when it is named after a person or account (`x-user`, `x-account-email`, `x-login`…); under other names only values that are data by their shape (an email, an id) count (B1).
+- GraphQL variable defaults were converted to JSON to move them into the variables, so valid GraphQL that isn't JSON went wrong: an input object with a trailing comma or a comment was removed from the document without its value, and a block string with an escaped `\"""` was cut short into an invalid document. Defaults are now read by a GraphQL constant parser (strings, block strings, numbers, lists, input objects, with commas and comments ignored); a default that doesn't parse stays in the document, where the leak guard still sees it (C3).
+
+**Security**
+- An unquoted multipart field name (`Content-Disposition: form-data; name=username`) wasn't read as evidence. Field names are now read as tokens or quoted strings, from the part's `Content-Disposition` header, and a boundary counts only at the start of a line (D4).
+- A server-sent event whose data spans several `data:` lines wasn't read: each line was parsed on its own. An event's `data:` lines are now joined up to the blank line that ends it (D5).
+- A `<` inside a script's JSON (`{"hint":"a < b",…}`) split the script before the JSON reader saw it. Script and style contents are now cut out as raw text, up to their end tag, before the rest of the markup is read (D6).
+
+**Slow inputs**
+- Removing GraphQL variable defaults searched the whole output once per default: 20,000 defaults took 13.5 s (the reviewer's measurement; 5.2 s for 10,000 here). It is linear now: 100,000 defaults in under 3 s for the whole `inspect` run (A2).
+
 ## 0.6.10
 
 Fixes from a fifteenth review: an independent read-only review by Claude Code against 0.6.9, fifteen findings (five leaks, three integrity, two security, one slow input, two quality, two claims) plus one suspected item. Each was reproduced here with the reviewer's input before it was fixed. Tests are in `test/review15.test.ts`, with generated variants. `test/fixtures/demo-snapshot.json` is unchanged.

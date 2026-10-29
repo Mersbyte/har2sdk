@@ -599,16 +599,17 @@ export function collectTaint(exchanges: Exchange[], evidence: Exchange[] = []): 
       } else if (body.kind === "text" || body.kind === "unparsed") {
         // XML / HTML / truncated JSON: values under their element, attribute or key name.
         const person = personPath(ex.pathname);
-        mapTextFields(body.raw.slice(0, 200_000), (v, k) => {
-          if (typeof v === "string") {
-            // A script is code, not a record: only the JSON written into it (a page's bootstrap state,
-            // window.__STATE__ = {…}, __NEXT_DATA__) is evidence, its other literals and names are not.
-            if (k !== "script" && k !== "style") c.add(v, k);
-            if (k === "script") for (const doc of jsonIn(v)) c.json(doc, undefined, 0, skipProtocolKeys, person);
-          } else if (typeof v === "number") c.addNumber(v, k);
+        // A script is code, not a record: only the JSON written into it (a page's bootstrap state,
+        // window.__STATE__ = {…}, __NEXT_DATA__) is evidence, its other literals and names are not.
+        // Script and style contents are raw text up to their end tag ("a < b" doesn't open a tag), so they
+        // are cut out before the markup is read.
+        const { prose, scripts } = splitScripts(body.raw.slice(0, 200_000));
+        for (const script of scripts) for (const doc of jsonIn(script)) c.json(doc, undefined, 0, skipProtocolKeys, person);
+        mapTextFields(prose, (v, k) => {
+          if (typeof v === "string") c.add(v, k);
+          else if (typeof v === "number") c.addNumber(v, k);
           return v;
         });
-        const prose = withoutScripts(body.raw.slice(0, 200_000));
         for (const w of prose.match(/[^\s"'<>,;()[\]{}]{5,}/g) ?? []) if (isDataLike(w)) c.add(w);
         // Server-sent events and JSON lines: each `data:` line or line is a JSON document.
         for (const doc of jsonLines(body.raw)) c.json(doc, undefined, 0, skipProtocolKeys, person);
@@ -636,9 +637,15 @@ export function collectTaint(exchanges: Exchange[], evidence: Exchange[] = []): 
         continue;
       }
       if (RESPONSE_STRUCTURE_HEADERS.test(name)) continue;
-      // x-user: okilic, x-account-email: … — the same rules as request headers.
-      c.add(value, name);
-      if (isIdentityKey(name)) c.addAlways(value, true);
+      if (aboutPerson(name)) {
+        // x-user: okilic, x-account-email: … — the same rules as request headers.
+        c.add(value, name);
+        if (isIdentityKey(name)) c.addAlways(value, true);
+      } else if (isDataLike(value)) {
+        // x-service-name: catalog, x-powered-by: Express describe the server, not a person: only a value
+        // that is data whatever its name (an id, an email) counts.
+        c.add(value);
+      }
     }
   }
   // A mailbox named like one of the API's own resources (cart@supplier.example next to GET /api/v1/cart)
@@ -658,43 +665,84 @@ export function collectTaint(exchanges: Exchange[], evidence: Exchange[] = []): 
   return c.taint;
 }
 
+/** A response header named after a person or account (x-user, x-account-id, x-login-email), by its words. */
+function aboutPerson(header: string): boolean {
+  return words(header).some((w) => PERSON_HEADER_WORD.test(w.toLowerCase()));
+}
+
+const PERSON_HEADER_WORD = /^(user|users|username|userid|uid|login|account|email|mail|member|customer|actor|viewer|subject|principal|owner|person|profile|employee|tenant|identity)$/;
+
 /** Response headers that describe the response, not the user (their values are never data). */
 const RESPONSE_STRUCTURE_HEADERS =
   /^(date|expires|last-modified|age|etag|vary|server|via|alt-svc|content-.*|cache-control|pragma|connection|keep-alive|transfer-encoding|strict-transport-security|access-control-.*|x-content-type-options|x-frame-options|x-xss-protection|referrer-policy|permissions-policy|cross-origin-.*|report-to|nel|timing-allow-origin|accept-ranges|link|upgrade|:.*)$/;
 
 const MAX_DOCS = 5000;
 
-/** Markup without its <script> and <style> elements (an unclosed one runs to the end). One pass. */
-function withoutScripts(text: string): string {
+/**
+ * Markup without its <script> and <style> elements, and the contents of the scripts. Their contents are
+ * raw text that ends only at the end tag (an unclosed one runs to the end of the text). One pass.
+ * Text that isn't markup is returned as it is.
+ */
+function splitScripts(text: string): { prose: string; scripts: string[] } {
+  if (!text.trimStart().startsWith("<")) return { prose: text, scripts: [] };
   const lower = text.toLowerCase();
   const open = /<(script|style)\b/g;
-  let out = "";
+  const scripts: string[] = [];
+  let prose = "";
   let at = 0;
   let m: RegExpExecArray | null;
   while ((m = open.exec(lower))) {
-    out += text.slice(at, m.index) + " ";
-    const close = lower.indexOf("</" + m[1], m.index + m[0].length);
-    if (close < 0) return out;
-    at = close;
-    open.lastIndex = close + 2;
+    prose += text.slice(at, m.index) + " ";
+    const tagEnd = lower.indexOf(">", m.index + m[0].length);
+    const close = tagEnd < 0 ? -1 : lower.indexOf("</" + m[1], tagEnd + 1);
+    if (m[1] === "script" && tagEnd >= 0) scripts.push(text.slice(tagEnd + 1, close < 0 ? text.length : close));
+    if (close < 0) return { prose, scripts };
+    // Skip the end tag itself.
+    const closeEnd = lower.indexOf(">", close);
+    at = closeEnd < 0 ? text.length : closeEnd + 1;
+    open.lastIndex = at;
   }
-  return out + text.slice(at);
+  return { prose: prose + text.slice(at), scripts };
 }
 
-/** JSON documents one per line: NDJSON, JSON Lines, and the `data:` lines of server-sent events. */
+/**
+ * JSON documents one per line (NDJSON, JSON Lines, JSON text sequences), and the events of a server-sent
+ * event stream, whose `data:` lines are joined with newlines up to the blank line that ends the event.
+ */
 function jsonLines(text: string): unknown[] {
   const out: unknown[] = [];
   let at = 0;
   const end = Math.min(text.length, 2_000_000);
+  let data: string[] = [];
+  let dataChars = 0;
+  const parse = (doc: string) => {
+    const t = doc.trim();
+    if (!/^[[{]/.test(t)) return;
+    const v = parseJson(t);
+    if (v !== NOT_JSON) out.push(v);
+  };
+  const flush = () => {
+    if (data.length) parse(data.join("\n"));
+    data = [];
+    dataChars = 0;
+  };
   while (at < end && out.length < MAX_DOCS) {
     let nl = text.indexOf("\n", at);
     if (nl < 0 || nl > end) nl = end;
-    const line = text.slice(at, nl).replace(/^\u001e/, "").replace(/^data:\s?/, "").trim();
+    const line = text.slice(at, nl).replace(/\r$/, "");
     at = nl + 1;
-    if (!/^[[{]/.test(line)) continue;
-    const v = parseJson(line);
-    if (v !== NOT_JSON) out.push(v);
+    if (line.startsWith("data:")) {
+      // One event's data: bounded like a text body.
+      if (dataChars < 200_000) data.push(line.slice(line.startsWith("data: ") ? 6 : 5));
+      dataChars += line.length;
+      continue;
+    }
+    flush();
+    // Other SSE fields (event:, id:, retry:, comments) carry no JSON; any other line is a JSON line.
+    if (/^(event|id|retry):|^:/.test(line)) continue;
+    parse(line.replace(/^\u001e/, ""));
   }
+  flush();
   return out;
 }
 
