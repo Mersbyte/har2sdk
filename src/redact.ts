@@ -499,7 +499,8 @@ export class Scrubber {
     if (v === "") return v;
     // Vocabulary stays only under technical keys (status, type, currency, brand,
     // protocol…): a lone word under "category" or "tag" can be a diagnosis.
-    const technical = key === undefined || TECHNICAL_KEY.test(words(key).pop() ?? "");
+    // A bare string (a top-level array item, a lone JSON string) has no key to vouch for it.
+    const technical = key !== undefined && TECHNICAL_KEY.test(words(key).pop() ?? "");
     if (VOCAB.test(v) || /^[a-z]{2,8}\d{1,3}$|^[A-Z]{2,6}\d{1,3}$/.test(v)) return technical ? v : this.fake(v);
     // Type names under a discriminator ("__typename": "Product", "type": "OrganizationMember").
     if (key !== undefined && DISCRIMINATOR_KEY.test(words(key).pop() ?? "") && /^[A-Z][a-z]+(?:[A-Z][a-z0-9]*)*$/.test(v)) return v;
@@ -698,8 +699,10 @@ function categoryRun(cp: number, re: RegExp): [number, number] {
 /** Keys whose value names a type: "__typename": "Product", "kind": "OrganizationMember". */
 const DISCRIMINATOR_KEY = /^(type|typename|kind|object|class|entity|resource|model)$/;
 
+// Not here: keys whose value is as often a person as a word (target, source, result, event,
+// operation, outcome, op): {"target": "oguz.kilic"}, a JSON-RPC {"result": "zkaya"}.
 const TECHNICAL_KEY =
-  /^(status|state|type|kind|role|level|tier|mode|stage|phase|priority|severity|method|currency|unit|format|variant|plan|visibility|sort|order|direction|channel|platform|action|locale|lang|language|country|size|interval|period|frequency|permission|access|strategy|availability|environment|env|brand|network|scheme|protocol|proto|mime|encoding|algorithm|algo|codec|version|source|provider|color|colour|theme|icon|align|position|layout|style|target|rel|lifecycle|outcome|result|code|error|err|errcode|event|op|operation|object|typename)$/;
+  /^(status|state|type|kind|role|level|tier|mode|stage|phase|priority|severity|method|currency|unit|format|variant|plan|visibility|sort|order|direction|channel|platform|action|locale|lang|language|country|size|interval|period|frequency|permission|access|strategy|availability|environment|env|brand|network|scheme|protocol|proto|mime|encoding|algorithm|algo|codec|version|provider|color|colour|theme|icon|align|position|layout|style|rel|lifecycle|code|error|err|errcode|object|typename)$/;
 
 function idKeyName(key: string | undefined): boolean {
   if (!key) return false;

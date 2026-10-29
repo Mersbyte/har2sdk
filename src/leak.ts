@@ -1,9 +1,14 @@
 /**
  * Leak guard.
  *
- * Before anything is generated, every value the capture recorded (bodies,
- * query strings, header values, cookies, path parameters) is collected into a
- * {@link Taint} set. The pipeline consults it while deciding what may become
+ * Before anything is generated, the values the capture recorded are collected
+ * into a {@link Taint} set: request and response bodies (JSON, forms, multipart
+ * fields, CSV, XML / HTML and JSON in a page's scripts, NDJSON and server-sent
+ * events), query strings, request headers, response headers other than the
+ * ones that describe the response, cookies, Basic credentials and WebSocket
+ * text frames — of the calls generated from and, as evidence only, of the
+ * requests the filter drops (trackers, pages, other hosts; not static assets),
+ * whose value-like path segments count too. The pipeline consults it while deciding what may become
  * code (a path literal, an enum, a property name, a default header…), and
  * after generation every output — client.ts, openapi.json, the chat prompt,
  * MCP responses, `inspect --json` — is scanned against it.
@@ -15,10 +20,10 @@
  * they are what enums and headers are made of.
  */
 import type { Exchange } from "./har.js";
-import { isObject } from "./har.js";
+import { isObject, NOT_JSON, parseJson } from "./har.js";
 import { graphqlLiteralMatches, quotedStrings, replacePercentRuns, trimDotsDashesTildes } from "./linear.js";
 import { isContactName, isDataKey, isEmail, isPersonalName, isPersonalNameWord, isSecretValue, isSensitiveName, Scrubber } from "./redact.js";
-import { singular, words } from "./words.js";
+import { isPlural, singular, words } from "./words.js";
 
 export interface Taint {
   /** Lower-cased recorded values that look like data. */
@@ -300,7 +305,8 @@ export class TaintCollector {
   readonly taint: Taint = emptyTaint();
 
   /** @param person false when the value sits in an object known not to describe a person. */
-  add(value: string, key?: string, person = true): void {
+  /** @param bare a string with no key at all inside a response the path says describes people. */
+  add(value: string, key?: string, person = true, bare = false): void {
     const v = value.trim();
     if (!v || v.length > 4000) return;
     const lower = v.toLowerCase();
@@ -313,7 +319,17 @@ export class TaintCollector {
     // ("okilic@corp.example" → "/people/okilic/…"), whatever key the email sat under.
     if (isEmail(v)) {
       const local = lower.slice(0, lower.indexOf("@")).replace(/\+.*$/, "");
-      if (local.length >= 3 && !COMMON.has(local) && !ROLE_MAILBOX.has(local) && /[a-z]/.test(local)) this.identity(local);
+      if (local.length >= 3 && !COMMON.has(local) && !ROLE_MAILBOX.has(local) && /[a-z]/.test(local)) {
+        const had = this.taint.identities.has(local);
+        this.identity(local);
+        if (!had) this.localOnly.add(local);
+      }
+    }
+    // A bare string in a people collection's response (GET /api/users → ["ece.kaya", "zkaya"]) names a person.
+    if (bare && usable && !/\s/.test(v) && v.length <= 64) {
+      this.identity(lower);
+      if (len >= 4) this.taint.values.add(lower);
+      return;
     }
     const personal = len >= 4 && usable && keyKind(key) !== 0;
     // A thing's one-word name (a category "Books", a repository "dotfiles"): a label, not personal data.
@@ -353,7 +369,7 @@ export class TaintCollector {
     for (let i = 0; i < parts.length; i++)
       for (let j = 0; j < parts.length; j++) {
         if (i === j || parts[i] === parts[j]) continue;
-        for (const sep of ["-", "_", ""]) this.identity(parts[i] + sep + parts[j]);
+        for (const sep of NAME_JOINS) this.identity(parts[i] + sep + parts[j]);
         const a = aliasOf(parts[i]! + " " + parts[j]!);
         if (a.length >= 8) this.taint.aliases.add(a);
       }
@@ -370,11 +386,25 @@ export class TaintCollector {
       const w = p.toLowerCase().replace(/[.'’]+$/, "");
       if (dataLength(w) < 3 || COMMON.has(w)) continue;
       this.taint.nameParts.add(w);
-      this.taint.nameParts.add(w.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/ı/g, "i"));
+      this.taint.nameParts.add(fold(w));
+    }
+    // An app builds slugs from the whole name ("ece-kaya", "li_wei", "ayse.oz", "ecekaya"), however
+    // short its words: the joins are identities, as for a name recorded in parts (joinedNames).
+    const ws = parts.map((p) => p.toLowerCase().replace(/[.'’]+$/, "")).filter((w) => dataLength(w) >= 2);
+    if (ws.length !== parts.length || ws.every((w) => COMMON.has(w))) return;
+    for (const list of [ws, ws.map(fold)]) {
+      for (const sep of NAME_JOINS) {
+        this.identity(list.join(sep));
+        if (list.length > 2) this.identity(list[0]! + sep + list[list.length - 1]!);
+      }
     }
   }
 
+  /** Identities known only as an email's local part (cart@supplier.example). */
+  readonly localOnly = new Set<string>();
+
   private identity(lower: string): void {
+    this.localOnly.delete(lower);
     if (this.taint.identities.has(lower)) return;
     this.taint.identities.add(lower);
     const form = aliasOf(lower);
@@ -403,7 +433,7 @@ export class TaintCollector {
   json(value: unknown, key?: string, depth = 0, skip?: (key: string, depth: number, owner: object) => boolean, person = false): void {
     if (depth > 64) return;
     if (typeof value === "string") {
-      this.add(value, key, person);
+      this.add(value, key, person, key === undefined && person);
       // JSON inside a string field ({"payload":"{\"login\":\"okilic\"}"}): its keys are evidence too.
       const inner = embeddedJson(value);
       if (inner !== undefined) this.json(inner, key, depth + 1, skip, person);
@@ -472,11 +502,39 @@ function isObjectLike(v: unknown): boolean {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
-export function collectTaint(exchanges: Exchange[]): Taint {
+/**
+ * @param exchanges the calls the SDK is generated from.
+ * @param evidence the rest of the capture (trackers, pages, other hosts): never generated from, but a
+ *   value it shows to be data (an analytics `userId`, a page's bootstrap `login`) is data everywhere.
+ */
+/** How apps join the words of a name into a slug or handle. */
+const NAME_JOINS = ["-", "_", ".", ""];
+
+/** Without diacritics, dotless i as i ("Ayşe Öz" → "ayse oz"): how slugs spell a name. */
+function fold(w: string): string {
+  return w.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/ı/g, "i");
+}
+
+export function collectTaint(exchanges: Exchange[], evidence: Exchange[] = []): Taint {
   const c = new TaintCollector();
   for (const ex of exchanges) {
     c.taint.allowed.add(ex.origin.toLowerCase());
     c.taint.allowed.add(ex.url.hostname.toLowerCase());
+  }
+  for (const ex of evidence) {
+    // A dropped request's path is never generated, so its value-like segments (an id, an email) are
+    // values to look for elsewhere (warnings, the prompt).
+    for (const seg of ex.pathname.split("/").slice(1, 32)) {
+      let v = seg;
+      try {
+        v = decodeURIComponent(seg);
+      } catch {
+        /* keep */
+      }
+      if (isDataLike(v)) c.add(v, "path");
+    }
+  }
+  for (const ex of [...exchanges, ...evidence]) {
     for (const [k, v] of ex.query) {
       // GraphQL over GET: the document is code, its inline literals are data.
       if (k === "query") graphqlLiterals(v, c);
@@ -506,6 +564,16 @@ export function collectTaint(exchanges: Exchange[]): Taint {
       if (isIdentityKey(name)) c.addAlways(value, true);
       const token = value.match(/^\S+\s+(\S{8,})$/)?.[1];
       if (token) c.add(token, name);
+      // Basic credentials: the user part is an identity, the password a secret.
+      const basic = value.match(/^basic\s+([A-Za-z0-9+/=_-]{4,})$/i)?.[1];
+      if (basic) {
+        const pair = Buffer.from(basic.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+        const i = pair.indexOf(":");
+        if (i > 0 && !/[\u0000-\u001f]/.test(pair)) {
+          c.addAlways(pair.slice(0, i), true);
+          c.add(pair.slice(i + 1), "password");
+        }
+      }
     }
     for (const body of [ex.requestBody, ex.responseBody]) {
       if (!body) continue;
@@ -518,8 +586,8 @@ export function collectTaint(exchanges: Exchange[]): Taint {
         else c.json(v, undefined, 0, skipProtocolKeys, person);
         // Inline literals in GraphQL documents are data too.
         for (const doc of graphqlDocs(v)) graphqlLiterals(doc, c);
-      } else if (body.kind === "form") {
-        for (const [k, v] of body.fields) {
+      } else if (body.kind === "form" || (body.kind === "multipart" && body.fields)) {
+        for (const [k, v] of body.fields ?? []) {
           for (const part of k.split(/[[\]]+/)) if (part && (isDataKey(part) || isDataLike(part))) c.add(part, "key");
           c.add(v, k);
         }
@@ -530,22 +598,142 @@ export function collectTaint(exchanges: Exchange[]): Taint {
         for (const row of rows.slice(1, 5000)) row.forEach((cell, i) => c.add(cell, head[i]));
       } else if (body.kind === "text" || body.kind === "unparsed") {
         // XML / HTML / truncated JSON: values under their element, attribute or key name.
+        const person = personPath(ex.pathname);
         mapTextFields(body.raw.slice(0, 200_000), (v, k) => {
-          if (typeof v === "string") c.add(v, k);
-          else if (typeof v === "number") c.addNumber(v, k);
+          if (typeof v === "string") {
+            // A script is code, not a record: only the JSON written into it (a page's bootstrap state,
+            // window.__STATE__ = {…}, __NEXT_DATA__) is evidence, its other literals and names are not.
+            if (k !== "script" && k !== "style") c.add(v, k);
+            if (k === "script") for (const doc of jsonIn(v)) c.json(doc, undefined, 0, skipProtocolKeys, person);
+          } else if (typeof v === "number") c.addNumber(v, k);
           return v;
         });
-        for (const w of body.raw.slice(0, 200_000).match(/[^\s"'<>,;()[\]{}]{5,}/g) ?? []) if (isDataLike(w)) c.add(w);
+        const prose = withoutScripts(body.raw.slice(0, 200_000));
+        for (const w of prose.match(/[^\s"'<>,;()[\]{}]{5,}/g) ?? []) if (isDataLike(w)) c.add(w);
+        // Server-sent events and JSON lines: each `data:` line or line is a JSON document.
+        for (const doc of jsonLines(body.raw)) c.json(doc, undefined, 0, skipProtocolKeys, person);
       }
+    }
+    // WebSocket frames, NDJSON bodies: the same documents, read as evidence only.
+    for (const text of ex.evidence ?? []) {
+      const whole = /^\s*[[{]/.test(text) ? parseJson(text) : NOT_JSON;
+      const docs = whole !== NOT_JSON ? [whole] : jsonLines(text);
+      for (const doc of docs) c.json(doc, undefined, 0, skipProtocolKeys, personPath(ex.pathname));
     }
     for (const [name, value] of ex.responseHeaders) {
       if (name === "set-cookie") {
         const i = value.indexOf("=");
         if (i > 0) c.add(value.slice(i + 1).split(";")[0] ?? "", "cookie");
+        continue;
       }
+      if (name === "location" || name === "content-location") {
+        // A redirect's query parameters are values under their names; its path has no names.
+        try {
+          new URL(value, ex.url).searchParams.forEach((v, k) => c.add(v, k));
+        } catch {
+          /* not a URL */
+        }
+        continue;
+      }
+      if (RESPONSE_STRUCTURE_HEADERS.test(name)) continue;
+      // x-user: okilic, x-account-email: … — the same rules as request headers.
+      c.add(value, name);
+      if (isIdentityKey(name)) c.addAlways(value, true);
+    }
+  }
+  // A mailbox named like one of the API's own resources (cart@supplier.example next to GET /api/v1/cart)
+  // is not the user's name in that path: the capture uses the word as an endpoint, as the last segment of
+  // a generated path and not as a member of a collection (/people/okilic) or after a person word (/user/okilic).
+  if (c.localOnly.size) {
+    for (const ex of exchanges) {
+      const segs = ex.pathname.toLowerCase().split("/").filter(Boolean);
+      const last = segs[segs.length - 1];
+      const prev = segs[segs.length - 2];
+      if (!last || !c.localOnly.has(last) || !/^\p{L}+$/u.test(last)) continue;
+      if (prev && (isPlural(prev) || personWord(prev))) continue;
+      c.taint.identities.delete(last);
+      c.localOnly.delete(last);
     }
   }
   return c.taint;
+}
+
+/** Response headers that describe the response, not the user (their values are never data). */
+const RESPONSE_STRUCTURE_HEADERS =
+  /^(date|expires|last-modified|age|etag|vary|server|via|alt-svc|content-.*|cache-control|pragma|connection|keep-alive|transfer-encoding|strict-transport-security|access-control-.*|x-content-type-options|x-frame-options|x-xss-protection|referrer-policy|permissions-policy|cross-origin-.*|report-to|nel|timing-allow-origin|accept-ranges|link|upgrade|:.*)$/;
+
+const MAX_DOCS = 5000;
+
+/** Markup without its <script> and <style> elements (an unclosed one runs to the end). One pass. */
+function withoutScripts(text: string): string {
+  const lower = text.toLowerCase();
+  const open = /<(script|style)\b/g;
+  let out = "";
+  let at = 0;
+  let m: RegExpExecArray | null;
+  while ((m = open.exec(lower))) {
+    out += text.slice(at, m.index) + " ";
+    const close = lower.indexOf("</" + m[1], m.index + m[0].length);
+    if (close < 0) return out;
+    at = close;
+    open.lastIndex = close + 2;
+  }
+  return out + text.slice(at);
+}
+
+/** JSON documents one per line: NDJSON, JSON Lines, and the `data:` lines of server-sent events. */
+function jsonLines(text: string): unknown[] {
+  const out: unknown[] = [];
+  let at = 0;
+  const end = Math.min(text.length, 2_000_000);
+  while (at < end && out.length < MAX_DOCS) {
+    let nl = text.indexOf("\n", at);
+    if (nl < 0 || nl > end) nl = end;
+    const line = text.slice(at, nl).replace(/^\u001e/, "").replace(/^data:\s?/, "").trim();
+    at = nl + 1;
+    if (!/^[[{]/.test(line)) continue;
+    const v = parseJson(line);
+    if (v !== NOT_JSON) out.push(v);
+  }
+  return out;
+}
+
+/**
+ * The JSON objects and arrays written into a script (`window.__STATE__ = {…}`, `push({…})`) or that a
+ * value is (`<script type="application/json">`). One pass: a candidate starts after `=`, `(`, `:` or `,`
+ * (or at the start) and ends at its balancing bracket; candidates that don't parse are skipped.
+ */
+function jsonIn(text: string): unknown[] {
+  const out: unknown[] = [];
+  const t = text.length > 1_000_000 ? text.slice(0, 1_000_000) : text;
+  let depth = 0;
+  let start = -1;
+  let quote = 0;
+  let prev = 0; // last non-space character outside strings, at depth 0
+  for (let i = 0; i < t.length && out.length < 50; i++) {
+    const ch = t.charCodeAt(i);
+    if (quote) {
+      if (ch === 92) i++;
+      else if (ch === quote) quote = 0;
+      continue;
+    }
+    if (ch === 34 || ch === 39 || ch === 96) {
+      quote = ch;
+      continue;
+    }
+    if (ch === 123 || ch === 91) {
+      if (depth === 0) start = prev === 0 || prev === 61 || prev === 40 || prev === 58 || prev === 44 ? i : -1;
+      depth++;
+    } else if (ch === 125 || ch === 93) {
+      if (depth > 0 && --depth === 0 && start >= 0) {
+        const v = parseJson(t.slice(start, i + 1));
+        if (v !== NOT_JSON && v !== null && typeof v === "object") out.push(v);
+        start = -1;
+      }
+    }
+    if (depth === 0 && ch > 32) prev = ch;
+  }
+  return out;
 }
 
 /** Parse simple CSV (header row + rows, no quoted newlines); undefined if it isn't CSV. */
@@ -876,6 +1064,14 @@ function joinedForm(identity: string): string {
 const IDENTITY_FORMS = new WeakMap<Taint, string[]>();
 
 /** The recorded identities (three or more characters) as their pieces joined: "ece_ak" → "eceak". */
+const IDENTITY_FORM_SETS = new WeakMap<Taint, Set<string>>();
+
+function identityJoinedFormSet(taint: Taint): Set<string> {
+  let set = IDENTITY_FORM_SETS.get(taint);
+  if (!set) IDENTITY_FORM_SETS.set(taint, (set = new Set(identityJoinedForms(taint))));
+  return set;
+}
+
 function identityJoinedForms(taint: Taint): string[] {
   let out = IDENTITY_FORMS.get(taint);
   if (!out) {
@@ -986,10 +1182,25 @@ export function scrubText(text: string, taint: Taint | undefined): string {
     .map((v) => new RegExp(`(?<![\\p{L}\\p{N}])${v.split(PIECE_SEP).filter(Boolean).map(escapeRe).join("[._+\\-~%@]*")}(?![\\p{L}\\p{N}])`, "giu"));
   // Identifier forms ("getRememberLee") of any recorded identity, not only of those whose compound path
   // is in this very text: a prompt is scrubbed in parts (the endpoint table, then the types).
-  const flatText = lower.replace(/[^\p{L}\p{N}]+/gu, "");
-  const hiddenForms = identityJoinedForms(taint).filter((f) => flatText.includes(f));
+  // One pass over the text's identifiers: the runs of their words that could be a form, looked up in a set
+  // (not one search of the whole text per identity, which was identities × text).
+  const formSet = identityJoinedFormSet(taint);
+  const hiddenForms = new Set<string>();
+  if (formSet.size) {
+    for (const id of decoded.match(/[A-Za-z_$][A-Za-z0-9_$]*/g) ?? []) {
+      const ws = words(id);
+      const n = Math.min(ws.length, MAX_PIECES);
+      for (let i = 0; i < n; i++) {
+        let run = "";
+        for (let j = i; j < n && j < i + MAX_SPAN; j++) {
+          run += ws[j];
+          if (formSet.has(run)) hiddenForms.add(run);
+        }
+      }
+    }
+  }
   const aliasHits = aliasesIn(taint, grams).flatMap(([, forms]) => forms);
-  if (!values.length && !aliasHits.length && !hidden.length && !hiddenForms.length) return text;
+  if (!values.length && !aliasHits.length && !hidden.length && !hiddenForms.size) return text;
   const redact = (s: string): string => {
     let out = s;
     for (const re of values) out = out.replace(re, "<redacted>");
@@ -1006,18 +1217,18 @@ export function scrubText(text: string, taint: Taint | undefined): string {
         return aliasHits.some((a) => flat.includes(a)) ? "Redacted" : id;
       });
     }
-    if (hiddenForms.length) {
+    if (hiddenForms.size) {
       // The same for a short or multi-part identity, which has to be a whole run of the identifier's words
       // ("getRememberLee" for "lee", never "sleeve").
       out = out.replace(/[A-Za-z_$][A-Za-z0-9_$]*/g, (id) => {
         const ws = words(id);
-        if (ws.length < 2 && !hiddenForms.includes(ws[0] ?? "")) return id;
+        if (ws.length < 2 && !hiddenForms.has(ws[0] ?? "")) return id;
         const n = Math.min(ws.length, MAX_PIECES);
         for (let i = 0; i < n; i++) {
           let run = "";
           for (let j = i; j < n && j < i + MAX_SPAN; j++) {
             run += ws[j];
-            if (hiddenForms.includes(run)) return "Redacted";
+            if (hiddenForms.has(run)) return "Redacted";
           }
         }
         return id;

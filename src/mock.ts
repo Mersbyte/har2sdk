@@ -255,7 +255,9 @@ function send(res: ServerResponse, status: number, contentType: string, payload:
     res.writeHead(status).end();
     return;
   }
-  res.writeHead(status, { "content-type": contentType }).end(payload);
+  // Replayed pages (HTML, XHTML, SVG) never run as documents on the mock's localhost origin, where a
+  // script could read the cookies of the user's other dev servers (cookies ignore ports).
+  res.writeHead(status, { "content-type": contentType, "x-content-type-options": "nosniff", "content-security-policy": "sandbox; default-src 'none'" }).end(payload);
 }
 
 /** The largest request body the mock reads; a bigger one gets 413. */

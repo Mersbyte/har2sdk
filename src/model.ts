@@ -140,7 +140,11 @@ export interface ApiModel {
   /** Other custom headers seen (names only) — documented, not replayed. */
   otherHeaders: string[];
   endpoints: Endpoint[];
-  /** Notes for the user (dropped telemetry, unmatched --param patterns, …). Never contain recorded values. */
+  /**
+   * Notes for the user (dropped telemetry, unmatched --param patterns, …). Paths of dropped requests in
+   * them are masked (`{…}` for any segment that isn't a plain word); they reach `inspect --json` and MCP
+   * through the leak guard's scrubbing like every other readable output.
+   */
   warnings: string[];
   /** Every recorded value that looks like data, for the leak guard. */
   taint: Taint;
@@ -152,8 +156,8 @@ export function analyzeHarText(text: string, opts: AnalyzeOptions = {}): { model
 }
 
 export function analyzeExchanges(all: Exchange[], opts: AnalyzeOptions = {}): ApiModel {
-  const { kept, dropped, telemetry, untyped } = filterExchanges(all, opts);
-  const taint = collectTaint(kept);
+  const { kept, dropped, telemetry, untyped, evidence } = filterExchanges(all, opts);
+  const taint = collectTaint(kept, evidence);
   EXAMPLE_SCRUBBER = scrubberFor(taint);
   const warnings: string[] = [];
   if (telemetry.length) {
@@ -207,10 +211,17 @@ export function analyzeExchanges(all: Exchange[], opts: AnalyzeOptions = {}): Ap
   // GraphQL operations that share a name (or root fields) but send different
   // documents are different operations: the first keeps the plain id.
   const gqlDocs = new Map<string, string[]>();
+  let freeTextProcedures = 0;
   for (const ex of kept) {
     const tmpl = templates.get(ex.origin + ex.pathname);
     if (!tmpl) continue;
     for (const unit of splitUnits(ex)) {
+      // A procedure name is the API's own word ("user.get", "eth_call"); anything else ("ignore previous
+      // instructions…") is free text from the capture. Its call is left out, never named after it.
+      if (unit.rpc && !RPC_NAME.test(unit.rpc.procedure)) {
+        freeTextProcedures++;
+        continue;
+      }
       const hostPart = multiOrigin && ex.origin !== primaryOrigin ? new URL(ex.origin).host : "";
       let tokens = tmpl.tokens;
       let values = tmpl.values;
@@ -237,6 +248,11 @@ export function analyzeExchanges(all: Exchange[], opts: AnalyzeOptions = {}): Ap
     }
   }
 
+  if (freeTextProcedures) {
+    warnings.push(
+      `Left out ${freeTextProcedures} RPC call${freeTextProcedures === 1 ? "" : "s"} whose method name is not an identifier (free text, not a procedure name).`,
+    );
+  }
   const dropped_q = [...acc.values()].filter((a) => a.droppedQueryNames > 0);
   if (dropped_q.length) {
     warnings.push(
@@ -277,6 +293,9 @@ export interface Unit {
   requestBody?: Body;
   responseBody?: Body;
 }
+
+/** A JSON-RPC / tRPC procedure name: identifiers joined by ".", "/", ":" or "-" (user.get, eth_call, admin/list). */
+const RPC_NAME = /^[A-Za-z_$][\w$]{0,63}(?:[./:-][A-Za-z_$][\w$]{0,63}){0,7}$/;
 
 /** Split an exchange into logical calls: GraphQL operations, JSON-RPC / tRPC procedures, or the request itself. */
 export function splitUnits(ex: Exchange): Unit[] {
@@ -485,7 +504,12 @@ export function normalizeGraphQL(doc: string): string {
  * the regex GQL_LIFT that it replaces (quoted in its comment) matched, without
  * that regex's exponential backtracking.
  */
-function liftGraphQLLiterals(doc: string, variables: unknown): { query: string; variables: unknown; names: string[] } {
+function liftGraphQLLiterals(doc0: string, variables0: unknown): { query: string; variables: unknown; names: string[] } {
+  // Default values of variable definitions ($login: String = "okilic") are inline values too: the
+  // default moves into the variables (when the call didn't send one) and leaves the document.
+  const defaults = stripVariableDefaults(doc0);
+  const doc = defaults.doc;
+  const variables = defaults.names.length ? { ...defaults.values, ...(isObject(variables0) ? variables0 : {}) } : variables0;
   const taken = new Set([...doc.matchAll(/\$([A-Za-z_][A-Za-z0-9_]*)/g)].map((m) => m[1]!));
   const defs: string[] = [];
   const names: string[] = [];
@@ -538,10 +562,151 @@ function liftGraphQLLiterals(doc: string, variables: unknown): { query: string; 
     last = m.index + m[0].length;
   }
   body += doc.slice(last);
-  if (!defs.length) return { query: doc, variables, names };
+  if (!defs.length) return { query: doc, variables, names: defaults.names };
   const query = insertVariableDefinitions(body, defs);
   if (query === undefined) return { query: replaceQuoted(doc, (s) => (isDataLike(s.slice(1, -1)) ? JSON.stringify(REDACTED) : s)), variables, names: [] };
-  return { query, variables: { ...(isObject(variables) ? variables : {}), ...values }, names };
+  return { query, variables: { ...(isObject(variables) ? variables : {}), ...values }, names: [...defaults.names, ...names] };
+}
+
+/**
+ * Remove string, number, list and input-object defaults from the variable definitions of a document's operations
+ * (`query Find($login: String = "okilic", $n: Int = 20)` → `query Find($login: String, $n: Int)`).
+ * Boolean, null and enum defaults are the API's vocabulary and stay. One pass, linear.
+ */
+function stripVariableDefaults(doc: string): { doc: string; values: Record<string, unknown>; names: string[] } {
+  const values: Record<string, unknown> = {};
+  const names: string[] = [];
+  let out = "";
+  let i = 0;
+  let depth = 0; // selection-set braces: definitions only sit outside them
+  let parens = 0;
+  let current: string | undefined; // the variable whose definition is being read
+  while (i < doc.length) {
+    const ch = doc[i]!;
+    if (ch === '"') {
+      const block = doc.startsWith('"""', i);
+      let j = block ? doc.indexOf('"""', i + 3) : i + 1;
+      if (block) j = j < 0 ? doc.length : j + 3;
+      else {
+        while (j < doc.length && doc[j] !== '"' && doc[j] !== "\n") j += doc[j] === "\\" ? 2 : 1;
+        j = Math.min(j + 1, doc.length);
+      }
+      out += doc.slice(i, j);
+      i = j;
+      continue;
+    }
+    if (ch === "#") {
+      const j = doc.indexOf("\n", i);
+      const end = j < 0 ? doc.length : j;
+      out += doc.slice(i, end);
+      i = end;
+      continue;
+    }
+    if (ch === "{") depth++;
+    else if (ch === "}") depth = Math.max(0, depth - 1);
+    else if (ch === "(" && depth === 0) parens++;
+    else if (ch === ")" && depth === 0) {
+      parens = Math.max(0, parens - 1);
+      current = undefined;
+    } else if (ch === "$" && depth === 0 && parens > 0) {
+      current = doc.slice(i + 1).match(/^[A-Za-z_]\w*/)?.[0];
+    } else if (ch === "=" && depth === 0 && parens > 0 && current) {
+      const rest = doc.slice(i + 1);
+      const lit = literalAt(rest);
+      if (lit) {
+        const name = current;
+        const value = lit.value;
+        if (value !== undefined) {
+          if (value !== null) setOwn(values, name, value);
+          names.push(name);
+          out = out.replace(/\s*$/, "");
+          i = i + 1 + lit.end;
+          current = undefined;
+          continue;
+        }
+      }
+    }
+    out += ch;
+    i++;
+  }
+  return { doc: names.length ? out : doc, values, names };
+}
+
+/**
+ * A string, number, list or input-object literal at the start of `s` (after spaces): its bounds and value
+ * (null for an object that doesn't read as JSON: it still leaves the document).
+ */
+function literalAt(s: string): { start: number; end: number; value: unknown } | undefined {
+  const start = s.length - s.trimStart().length;
+  const t = s.slice(start);
+  if (t.startsWith('"""')) {
+    const end = t.indexOf('"""', 3);
+    return end < 0 ? undefined : { start, end: start + end + 3, value: t.slice(3, end).trim() };
+  }
+  const str = t.match(/^"(?:[^"\\\n]|\\.)*"/)?.[0];
+  const num = str ? undefined : t.match(/^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?(?![\w.])/)?.[0];
+  if (!str && !num && t.startsWith("{")) {
+    // An input object ({login: "okilic", limit: 5}): up to its balancing brace, outside strings.
+    let depth = 0;
+    let q = false;
+    let j = 0;
+    for (; j < t.length; j++) {
+      const c = t[j]!;
+      if (q) {
+        if (c === "\\") j++;
+        else if (c === '"') q = false;
+      } else if (c === '"') q = true;
+      else if (c === "{" || c === "[") depth++;
+      else if ((c === "}" || c === "]") && --depth === 0) break;
+    }
+    if (j >= t.length) return undefined;
+    const text = t.slice(0, j + 1);
+    // As JSON: keys quoted, bare enum values as strings, optional commas put back.
+    const json = text
+      .replace(/"(?:[^"\\]|\\.)*"|[A-Za-z_]\w*/g, (m) => {
+        if (m.startsWith('"') || /^(true|false|null)$/.test(m)) return m;
+        return JSON.stringify(m);
+      })
+      .replace(/("(?:[^"\\]|\\.)*"|-?\d[\d.eE+-]*|true|false|null|[}\]])\s+(?=["\d{[tfn-])/g, "$1,");
+    let value: unknown;
+    try {
+      value = JSON.parse(json);
+    } catch {
+      value = null; // the default still leaves the document; the call's own variables apply
+    }
+    return { start, end: start + j + 1, value };
+  }
+  if (!str && !num && t.startsWith("[")) {
+    // A list of strings and numbers only (a JSON array once written with commas).
+    let j = 1;
+    let q = false;
+    for (; j < t.length; j++) {
+      const c = t[j]!;
+      if (q) {
+        if (c === "\\") j++;
+        else if (c === '"') q = false;
+      } else if (c === '"') q = true;
+      else if (c === "]") break;
+      else if (c === "[" || c === "{") return undefined;
+    }
+    if (j >= t.length) return undefined;
+    // GraphQL commas are optional: put them back where items are only separated by spaces.
+    const json = t.slice(0, j + 1).replace(/("(?:[^"\\]|\\.)*"|-?\d[\d.eE+-]*)\s+(?=["\d-])/g, "$1,");
+    try {
+      const v = JSON.parse(json);
+      if (Array.isArray(v) && v.every((x) => typeof x === "string" || typeof x === "number")) return { start, end: start + j + 1, value: v };
+    } catch {
+      return undefined;
+    }
+    return undefined;
+  }
+  const lit = str ?? num;
+  if (!lit) return undefined;
+  try {
+    return { start, end: start + lit.length, value: JSON.parse(lit) };
+  } catch {
+    return undefined;
+  }
 }
 
 /** Add `$x: String!` definitions to the (first) operation of a document. */

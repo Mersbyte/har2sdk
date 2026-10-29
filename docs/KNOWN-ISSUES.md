@@ -6,7 +6,7 @@ Problems found during the 0.6.0 work that were not fixed, with the reason.
 
 - **Values with no evidence.** A plain word used once as a path segment, never echoed, never listed and never stored under a personal or identity key (for example `/api/whoami` returning the text `mdemir` and nothing else naming it) can't be recognised. This is the documented limit of the guard (SECURITY.md, *Limits*).
 - **Short or lower-case random tokens.** Letter-only tokens are judged by rare letter pairs and case flips (0.6.1, A4). Long mixed-case tokens are recognised; a 12-letter lower-case one about half the time (`xkqbvtrmplsa` yes, a pronounceable `kobulimaterasu` no). The other direction: a camel-case name made mostly of acronyms (`ListAWSIAMRolesForEC`) and some surnames (`kowalczyk`) count as random, so such a path segment becomes a parameter.
-- **GraphQL variable defaults.** `query Q($login: String = "mdemir")` keeps the default in the document. The guard recognises it and refuses to write the client; it is not lifted (see docs/IDEAS.md).
+- **GraphQL variable defaults.** Since 0.6.10 string, number, list and input-object defaults move into the variables and leave the document; boolean, null and enum defaults stay. A recorded value in a `#` comment of a document stays in `client.ts` (the prompt and MCP show documents without comments); the guard recognises it and refuses to write the client.
 
 ## Correctness
 

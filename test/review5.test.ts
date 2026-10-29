@@ -636,8 +636,9 @@ describe("C17 --examples on the demo is not refused", () => {
     expect(r.files["openapi.json"]).toContain('"example"');
   });
   it("a recorded value in the spec itself still is", () => {
-    // A GraphQL variable default is kept in the document (docs/KNOWN-ISSUES.md): the guard must still refuse it.
-    const r = gen([entry({ method: "POST", url: O + "/graphql", reqBody: { query: 'query Q($login: String = "mdemir") { user(login: $login) { id } }' }, resBody: { data: { user: { id: 1 } } } })], { examples: true });
+    // A comment in the document is kept as written (variable defaults move into the variables since
+    // review 15): the guard must still refuse the email in it.
+    const r = gen([entry({ method: "POST", url: O + "/graphql", reqBody: { query: "query Q { user { id } } # owner mdemir@corp.example" }, resBody: { data: { user: { id: 1 } } } })], { examples: true });
     expect(r.leaks.length).toBeGreaterThan(0);
   });
 });

@@ -40,6 +40,8 @@ export interface HarEntry {
   };
   /** Chrome-specific: "xhr", "fetch", "script", "image", ... */
   _resourceType?: string;
+  /** Chrome-specific: the frames of a WebSocket connection. */
+  _webSocketMessages?: { type?: string; opcode?: number; data?: string }[];
 }
 
 export type Body =
@@ -50,7 +52,8 @@ export type Body =
   /** JSON by content type, but it doesn't parse (truncated or not really JSON). */
   | { kind: "unparsed"; raw: string; mimeType: string }
   | { kind: "form"; fields: [string, string][]; raw: string; mimeType: string }
-  | { kind: "multipart"; mimeType: string }
+  /** `fields`: the parts that aren't files, read by the leak guard only. */
+  | { kind: "multipart"; mimeType: string; fields?: [string, string][] }
   | { kind: "text"; raw: string; mimeType: string }
   | { kind: "binary"; mimeType: string };
 
@@ -70,6 +73,11 @@ export interface Exchange {
   responseBody?: Body;
   resourceType?: string;
   startedAt?: string;
+  /**
+   * Text the HAR stores that nothing else models (WebSocket frames, NDJSON / JSON-seq bodies).
+   * Only the leak guard reads it, as evidence of which values are data.
+   */
+  evidence?: string[];
 }
 
 export class HarError extends Error {
@@ -156,6 +164,7 @@ export function normaliseEntries(entries: HarEntry[]): Exchange[] {
       responseBody: entry.response.content ? parseResponseBody(entry.response.content, resMime) : undefined,
       resourceType: entry._resourceType,
       startedAt: entry.startedDateTime,
+      ...withEvidence(entry, reqMime, resMime),
     });
   });
   return out;
@@ -385,13 +394,16 @@ function parseRequestBody(pd: HarPostData, mimeHeader: string): Body | undefined
       /* leave as is */
     }
   }
-  if (mimeType.startsWith("multipart/")) return { kind: "multipart", mimeType };
+  if (mimeType.startsWith("multipart/")) return { kind: "multipart", mimeType, fields: multipartFields(text, pd.mimeType || mimeHeader || "") }; // the boundary is case-sensitive
   if (mimeType.includes("application/x-www-form-urlencoded")) {
     const fields: [string, string][] = [];
-    if (pd.params?.length) {
-      for (const p of pd.params) fields.push([p.name, safeDecode(p.value ?? "")]);
-    } else {
+    if (text) {
+      // The body text is the one encoding every exporter agrees on.
       new URLSearchParams(text).forEach((v, k) => fields.push([k, v]));
+    } else if (pd.params?.length) {
+      // Chromium stores `params` already decoded, Firefox percent-encoded: decode only what is still
+      // encoded, and never turn "+" into a space (zk+work@corp.example stays an email).
+      for (const p of pd.params) fields.push([String(p.name ?? ""), decodeOnce(String(p.value ?? ""))]);
     }
     return { kind: "form", fields, raw: text, mimeType };
   }
@@ -494,12 +506,73 @@ function jsonDepth(text: string): number {
   return max;
 }
 
-function safeDecode(s: string): string {
+/** Percent-decode a value that is still encoded; leave a decoded one (and "+") alone. */
+function decodeOnce(s: string): string {
+  if (!/%[0-9A-Fa-f]{2}/.test(s)) return s;
   try {
-    return decodeURIComponent(s.replace(/\+/g, " "));
+    return decodeURIComponent(s);
   } catch {
     return s;
   }
+}
+
+const MAX_EVIDENCE_PARTS = 2000;
+const MAX_EVIDENCE_CHARS = 200_000;
+/** At most this much evidence text per entry (a long WebSocket session can hold far more). */
+const MAX_EVIDENCE_TOTAL = 2_000_000;
+
+/** The non-file parts of a multipart body ("--B\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\nvalue"). */
+function multipartFields(text: string, mimeType: string): [string, string][] {
+  const boundary = mimeType.match(/boundary=(?:"([^"]+)"|([^;\s]+))/i);
+  const b = boundary?.[1] ?? boundary?.[2];
+  if (!b || !text) return [];
+  const out: [string, string][] = [];
+  for (const part of text.slice(0, 4 * MAX_EVIDENCE_CHARS).split("--" + b)) {
+    if (out.length >= MAX_EVIDENCE_PARTS) break;
+    const sep = part.search(/\r?\n\r?\n/);
+    if (sep < 0) continue;
+    const head = part.slice(0, sep);
+    const name = head.match(/\bname="([^"]*)"/i)?.[1];
+    if (name === undefined || /\bfilename\*?=/i.test(head)) continue;
+    const value = part.slice(sep).replace(/^\r?\n\r?\n/, "").replace(/\r?\n$/, "");
+    out.push([name, value.slice(0, MAX_EVIDENCE_CHARS)]);
+  }
+  return out;
+}
+
+/** NDJSON, JSON Lines and JSON text sequences: text the body parser files as binary. */
+const LINE_JSON_MIME = /ndjson|jsonl|json-seq|jsonlines/;
+
+function withEvidence(entry: HarEntry, reqMime: string, resMime: string): { evidence?: string[] } {
+  const out: string[] = [];
+  let budget = MAX_EVIDENCE_TOTAL;
+  const push = (t: unknown) => {
+    if (typeof t !== "string" || !t || out.length >= MAX_EVIDENCE_PARTS || budget <= 0) return;
+    const kept = t.slice(0, Math.min(MAX_EVIDENCE_CHARS, budget));
+    budget -= kept.length;
+    out.push(kept);
+  };
+  const content = entry.response.content;
+  if (content && LINE_JSON_MIME.test(resMime.toLowerCase()) && typeof content.text === "string") {
+    let text = content.text;
+    if (content.encoding === "base64") {
+      try {
+        text = decodeBytes(Buffer.from(text, "base64"), resMime);
+      } catch {
+        text = "";
+      }
+    }
+    push(text);
+  }
+  if (LINE_JSON_MIME.test(reqMime.toLowerCase())) push(entry.request.postData?.text);
+  const frames = entry._webSocketMessages;
+  if (Array.isArray(frames)) {
+    for (const f of frames) {
+      // Text frames only (opcode 1); binary frames are base64 in the HAR.
+      if (f && typeof f === "object" && (f.opcode === undefined || f.opcode === 1)) push(f.data);
+    }
+  }
+  return out.length ? { evidence: out } : {};
 }
 
 export function isObject(v: unknown): v is Record<string, any> {

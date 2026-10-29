@@ -6,7 +6,7 @@ import type { Plan, PlannedOp, PlannedParam } from "./plan.js";
 import { printTs, printTsInterface, type TypeNode } from "./types.js";
 import { propertyKey } from "./words.js";
 
-export const VERSION = "0.6.9";
+export const VERSION = "0.6.10";
 
 export function generateTypeScript(plan: Plan): string {
   const { model, clientName, ops } = plan;
@@ -306,10 +306,13 @@ function encodeLiteral(seg: string): string {
 function pathExpr(op: PlannedOp): string {
   const { ep } = op;
   if (!ep.tokens.length) return JSON.stringify("/");
-  const parts = ep.tokens.map((t) => (t.kind === "param" ? `\${enc(params${access(t.name)})}` + encodeLiteral(t.suffix ?? "").replace(/[`\\$]/g, "\\$&") : encodeLiteral(t.value).replace(/[`\\$]/g, "\\$&")));
   const hasParam = ep.tokens.some((t) => t.kind === "param");
-  const s = "/" + parts.join("/");
-  return hasParam ? "`" + s + "`" : JSON.stringify(s);
+  if (!hasParam) return JSON.stringify("/" + ep.tokens.map((t) => encodeLiteral(t.kind === "param" ? "" : t.value)).join("/"));
+  // Escape for a template literal only when one is emitted: a backslash before "$" in a JSON string is a real backslash
+  // ("/odata/$metadata" would request "/odata//$metadata").
+  const tpl = (x: string) => x.replace(/[`\\$]/g, "\\$&");
+  const parts = ep.tokens.map((t) => (t.kind === "param" ? `\${enc(params${access(t.name)})}` + tpl(encodeLiteral(t.suffix ?? "")) : tpl(encodeLiteral(t.value))));
+  return "`/" + parts.join("/") + "`";
 }
 
 const RUNTIME_TYPES = `export interface RequestOptions {

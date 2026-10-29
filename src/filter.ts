@@ -3,6 +3,7 @@
  * (images, fonts, scripts, analytics beacons, CORS preflights, ...).
  */
 import { isJsonMime, type Exchange } from "./har.js";
+import { isValueSegment } from "./template.js";
 
 export type DropReason =
   | "preflight"
@@ -224,6 +225,12 @@ export interface FilterResult {
   telemetry: string[];
   /** Requests dropped because nothing said what they are (empty body, no content type), at most five. */
   untyped: string[];
+  /**
+   * Dropped requests that can still show which values are data (trackers, pages, telemetry, other
+   * hosts): the leak guard reads them, nothing is generated from them. Static assets (scripts,
+   * styles, images) are code and media, not records, and are left out.
+   */
+  evidence: Exchange[];
 }
 
 export function filterExchanges(exchanges: Exchange[], opts: FilterOptions = {}): FilterResult {
@@ -231,12 +238,15 @@ export function filterExchanges(exchanges: Exchange[], opts: FilterOptions = {})
   const dropped: Partial<Record<DropReason, number>> = {};
   const telemetry = new Set<string>();
   const untyped: Exchange[] = [];
-  const label = (ex: Exchange) => `${ex.method} ${ex.pathname.length > 60 ? ex.pathname.slice(0, 60) + "…" : ex.pathname}`;
+  const evidence: Exchange[] = [];
+  const label = (ex: Exchange) => `${ex.method.replace(/[^A-Za-z]/g, "").slice(0, 12)} ${maskedPath(ex.pathname)}`;
   for (const ex of exchanges) {
     const reason = classify(ex, opts);
     if (reason === "unknown-type") untyped.push(ex);
     else if (reason) dropped[reason] = (dropped[reason] ?? 0) + 1;
     else kept.push(ex);
+    // A WebSocket entry has a ws:// or wss:// URL: its frames are still evidence.
+    if (reason && reason !== "unknown-type" && reason !== "static-asset" && (reason !== "not-http" || ex.evidence?.length)) evidence.push(ex);
     if (reason === "telemetry" && telemetry.size < 5) telemetry.add(label(ex));
   }
   // An untyped answer to a call the capture shows elsewhere (a 304 after a 200) is that call.
@@ -245,10 +255,34 @@ export function filterExchanges(exchanges: Exchange[], opts: FilterOptions = {})
   for (const ex of untyped) {
     if (known.has(`${ex.method} ${ex.origin}${ex.pathname}`)) kept.push(ex);
     else {
+      evidence.push(ex);
       dropped["unknown-type"] = (dropped["unknown-type"] ?? 0) + 1;
       if (skipped.size < 5) skipped.add(label(ex));
     }
   }
   if (untyped.length) kept.sort((a, b) => a.index - b.index);
-  return { kept, dropped, telemetry: [...telemetry], untyped: [...skipped] };
+  return { kept, dropped, telemetry: [...telemetry], untyped: [...skipped], evidence };
+}
+
+/**
+ * A dropped request's path for a warning, with every segment that could be a value replaced by `{…}`:
+ * ids and emails by their shape, and anything that isn't a plain word. Warnings reach `inspect --json`
+ * and MCP, and a dropped request's path is never templated.
+ */
+export function maskedPath(pathname: string): string {
+  let prev: string | undefined;
+  const out: string[] = [];
+  for (const raw of pathname.split("/").slice(1, 9)) {
+    let seg = raw;
+    try {
+      seg = decodeURIComponent(raw);
+    } catch {
+      /* keep */
+    }
+    const plain = /^[A-Za-z][A-Za-z_-]{0,39}$/.test(seg) || /^v\d{1,2}$/i.test(seg) || /^[A-Za-z][\w-]{0,39}\.(js|json|css|html?|php|aspx?|xml|txt)$/i.test(seg);
+    out.push(!seg ? "" : plain && !isValueSegment(seg, prev) ? seg : "{…}");
+    prev = seg;
+  }
+  const more = pathname.split("/").length > 9 ? "/…" : "";
+  return "/" + out.join("/") + more;
 }
