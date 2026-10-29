@@ -18,7 +18,7 @@
 npx har2sdk capture.har
 ```
 
-Figuring out an undocumented API in DevTools → Network takes an afternoon: which endpoints exist, what the ids look like, which fields are optional, what auth it wants. har2sdk does it in one command for JSON APIs — REST, GraphQL, JSON-RPC and tRPC — and gives you a client you can import:
+Figuring out an undocumented API in DevTools → Network takes an afternoon: which endpoints exist, what the ids look like, which fields are optional, what auth it wants. har2sdk does it in one command for JSON APIs — REST, GraphQL, JSON-RPC and tRPC — **entirely on your machine: it makes no network requests and never sends your capture anywhere** (the optional [naming step with Claude](#better-names-with-claude--no-api-key) sees endpoints and types, with the recorded values the leak guard knows replaced by `<redacted>`). It gives you a client you can import:
 
 ```ts
 import { AcmeShopClient } from "./har2sdk-out/client.js";
