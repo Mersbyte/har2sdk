@@ -521,23 +521,47 @@ const MAX_EVIDENCE_CHARS = 200_000;
 /** At most this much evidence text per entry (a long WebSocket session can hold far more). */
 const MAX_EVIDENCE_TOTAL = 2_000_000;
 
-/** The non-file parts of a multipart body ("--B\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\nvalue"). */
+/**
+ * The non-file parts of a multipart body ("--B\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\nvalue").
+ * A delimiter is "--" + boundary at the start of a line (RFC 2046); the `name` parameter is a token or a
+ * quoted string (RFC 7578), and a part with a `filename` is a file.
+ */
 function multipartFields(text: string, mimeType: string): [string, string][] {
-  const boundary = mimeType.match(/boundary=(?:"([^"]+)"|([^;\s]+))/i);
-  const b = boundary?.[1] ?? boundary?.[2];
+  const b = dispositionParam(mimeType, "boundary");
   if (!b || !text) return [];
+  const body = text.slice(0, 4 * MAX_EVIDENCE_CHARS);
+  const delimiter = "--" + b;
+  // Delimiter positions: at the very start, or right after a line break.
+  const starts: number[] = [];
+  for (let i = body.indexOf(delimiter); i >= 0 && starts.length <= MAX_EVIDENCE_PARTS; i = body.indexOf(delimiter, i + delimiter.length)) {
+    if (i === 0 || body[i - 1] === "\n") starts.push(i);
+  }
   const out: [string, string][] = [];
-  for (const part of text.slice(0, 4 * MAX_EVIDENCE_CHARS).split("--" + b)) {
-    if (out.length >= MAX_EVIDENCE_PARTS) break;
+  for (let k = 0; k < starts.length && out.length < MAX_EVIDENCE_PARTS; k++) {
+    const from = starts[k]! + delimiter.length;
+    if (body.startsWith("--", from)) break; // the closing delimiter
+    const to = k + 1 < starts.length ? starts[k + 1]! : body.length;
+    const part = body.slice(from, to).replace(/^[ \t]*\r?\n/, "");
     const sep = part.search(/\r?\n\r?\n/);
     if (sep < 0) continue;
     const head = part.slice(0, sep);
-    const name = head.match(/\bname="([^"]*)"/i)?.[1];
-    if (name === undefined || /\bfilename\*?=/i.test(head)) continue;
+    const disposition = head.split(/\r?\n/).find((l) => /^content-disposition\s*:/i.test(l));
+    if (!disposition) continue;
+    const name = dispositionParam(disposition, "name");
+    if (name === undefined || dispositionParam(disposition, "filename") !== undefined || dispositionParam(disposition, "filename*") !== undefined) continue;
     const value = part.slice(sep).replace(/^\r?\n\r?\n/, "").replace(/\r?\n$/, "");
     out.push([name, value.slice(0, MAX_EVIDENCE_CHARS)]);
   }
   return out;
+}
+
+/** A parameter of a header value (`name=x`, `name="x"`, `name="a\"b"`), matched as a whole parameter name. */
+function dispositionParam(header: string, param: string): string | undefined {
+  for (const m of header.matchAll(/;\s*([^\s=;]+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^;\s]*))/g)) {
+    if (m[1]!.toLowerCase() !== param) continue;
+    return m[2] !== undefined ? m[2].replace(/\\(.)/g, "$1") : m[3]!;
+  }
+  return undefined;
 }
 
 /** NDJSON, JSON Lines and JSON text sequences: text the body parser files as binary. */
