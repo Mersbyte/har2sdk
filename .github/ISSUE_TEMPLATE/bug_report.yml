@@ -1,0 +1,41 @@
+name: Bug report
+description: Wrong output, a crash, a refusal that looks wrong, or a capture har2sdk can't read.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Please never attach or paste a HAR file.** It holds your cookies, tokens and personal data.
+        Paste the output of `har2sdk inspect capture.har --json` instead: it replaces the recorded values the leak guard knows with `<redacted>`. Read it before you paste it; the guard is a heuristic.
+        If a recorded value ended up in an output, please [report it privately](https://github.com/Mersbyte/har2sdk/security/advisories/new) instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: input
+    id: command
+    attributes:
+      label: Command you ran
+      placeholder: npx har2sdk capture.har -o out
+    validations:
+      required: true
+  - type: textarea
+    id: inspect
+    attributes:
+      label: "`har2sdk inspect capture.har --json` output"
+      description: Checked by you for anything personal. Trim it to the endpoints that matter if it's long.
+      render: json
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: "`npx har2sdk --version`, `node --version`, OS, and the browser or tool that recorded the HAR."
+    validations:
+      required: true
+  - type: textarea
+    id: minimal
+    attributes:
+      label: A minimal synthetic input (optional)
+      description: If you can, a tiny HAR you wrote by hand with made-up values that shows the problem.
