@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a leak or a vulnerability (privately)
+    url: https://github.com/Mersbyte/har2sdk/security/advisories/new
+    about: A recorded value in a generated file, prompt, MCP response or mock response, or a way to inject code. Please don't open a public issue for these.

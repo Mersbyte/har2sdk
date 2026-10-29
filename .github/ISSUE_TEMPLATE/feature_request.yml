@@ -1,0 +1,18 @@
+name: Feature request
+description: Something har2sdk should do, or do differently.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The API or workflow, and where har2sdk falls short today.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help?
+  - type: markdown
+    attributes:
+      value: Please describe APIs with made-up names and values, never with a real capture.
