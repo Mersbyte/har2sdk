@@ -18,6 +18,7 @@ import { scrubText } from "./leak.js";
 import { analyzeExchanges, type ApiModel } from "./model.js";
 import { loadHarFile } from "./har.js";
 import type { Exchange } from "./har.js";
+import { literalPathWords, renderPathWords } from "./pathwords.js";
 import { buildPlan } from "./plan.js";
 import { stripControl } from "./term.js";
 import { ANNOTATION_FORMAT, renderEndpointDetail, renderEndpointList, signature } from "./summary.js";
@@ -148,13 +149,16 @@ export function createMcpServer(): McpServer {
     },
     async ({ har_path, hosts }) => {
       try {
-        const { model } = await load(har_path, hosts);
+        const { model, exchanges } = await load(har_path, hosts);
         if (!model.endpoints.length) {
           if (hosts?.length && model.stats.dropped["host-filter"]) return fail(`None of the ${model.stats.entries} requests is on ${hosts.join(", ")}. Call analyze_har without hosts to see what the capture has.`);
           return fail(`No API calls found (${model.stats.entries} requests, all noise). Was "Preserve log" on and did the app make XHR/fetch calls?`);
         }
         const plan = buildPlan(model);
-        return text(renderEndpointList(plan) + `\n\nNext: inspect_endpoint for anything unclear, then generate_sdk with annotations.`);
+        // The words the leak guard can't judge, for the user to check (redacted like everything else here).
+        const words = renderPathWords(plan, literalPathWords(plan, exchanges), { limit: 20, for: "mcp" });
+        const section = words.length ? `\n\n${scrubText(words.join("\n"), model.taint)}` : "";
+        return text(renderEndpointList(plan) + section + `\n\nNext: inspect_endpoint for anything unclear, then generate_sdk with annotations.`);
       } catch (err) {
         return fail(String((err as Error).message ?? err));
       }
@@ -265,6 +269,8 @@ export function createMcpServer(): McpServer {
             ...result.plan.ops.map((o) => `- ${signature(o)}`),
           ];
           if (result.warnings.length) lines.push("", "Warnings:", ...result.warnings.map((w) => `- ${w}`));
+          const words = renderPathWords(result.plan, literalPathWords(result.plan, exchanges), { limit: 20, for: "mcp" });
+          if (words.length) lines.push("", ...words);
           lines.push("", `Usage: import { ${result.plan.clientName} } from "./client.js"; const api = new ${result.plan.clientName}({ /* token, headers */ });`);
           return text(scrubText(lines.join("\n"), model.taint));
         });
