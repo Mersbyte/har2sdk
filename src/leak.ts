@@ -22,7 +22,7 @@
 import type { Exchange } from "./har.js";
 import { isObject, NOT_JSON, parseJson } from "./har.js";
 import { graphqlLiteralMatches, quotedStrings, replacePercentRuns, trimDotsDashesTildes } from "./linear.js";
-import { isContactName, isDataKey, isEmail, isPersonalName, isPersonalNameWord, isSecretValue, isSensitiveName, Scrubber } from "./redact.js";
+import { dataKeysOf, isContactName, isDataKey, isEmail, isOrderingKey, isPersonalName, isPersonalNameWord, isSecretValue, isSensitiveName, Scrubber } from "./redact.js";
 import { isPlural, singular, words } from "./words.js";
 
 export interface Taint {
@@ -69,9 +69,20 @@ const IDENTITY_WORDS = new Set(
   (
     "login username user handle nickname nick owner author by sender from recipient to assignee assignees member members uid screenname account tenant org organization workspace team customer creator reporter " +
     // People in a role: they hold a username as often as an object.
-    "reviewer reviewers approver approvers requester submitter editor organizer organiser invitee inviter participant participants attendee attendees follower followers friend friends actor maintainer contributor collaborator commenter uploader buyer seller mention mentions"
+    "reviewer reviewers approver approvers requester submitter editor organizer organiser invitee inviter participant participants attendee attendees follower followers friend friends actor maintainer contributor collaborator commenter uploader buyer seller mention mentions " +
+    // The same roles in Turkish, German, Spanish and French (the languages of the personal-key pools).
+    "kullanici kullanıcı kullaniciadi kullanıcıadı sahip sahibi yazar gonderen gönderen alici alıcı uye üye hesap " +
+    "benutzer benutzername nutzer nutzername anmeldename besitzer eigentuemer eigentümer verfasser absender empfaenger empfänger mitglied konto " +
+    "usuario usuarios autor propietario dueno dueño remitente destinatario miembro cuenta apodo " +
+    "utilisateur pseudo identifiant auteur proprietaire propriétaire expediteur expéditeur destinataire membre compte"
   ).split(" "),
 );
+
+/** Identity keys that are as often navigation or ordering as a person: `from`, `to`, `by`. */
+const WEAK_IDENTITY_KEYS = new Set(["from", "to", "by"]);
+
+/** Id keys whose value is as often a word as an id: `ref=main`, `number=one`. */
+const WEAK_ID_WORDS = new Set(["ref", "reference", "number", "no", "nr", "num"]);
 
 /** Placeholder and role words ("owner", "member", "reviewer"): never a person's name on their own. */
 const COMMON = new Set([
@@ -103,9 +114,24 @@ export function isIdentityKey(key: string | undefined): boolean {
 function identityKey(key: string): boolean {
   const w = words(key.replace(/^x-/, ""));
   const last = w[w.length - 1] ?? "";
+  // sort_by, order_by, group_by name a field to order by, not a person.
+  if (isOrderingKey(key)) return false;
   if (IDENTITY_WORDS.has(last)) return true;
-  // userName, ownerLogin, tenantSlug, authorHandle, teamSlug
-  return w.length >= 2 && IDENTITY_WORDS.has(w[w.length - 2]!) && ["name", "login", "slug", "handle", "key"].includes(last);
+  // userName, ownerLogin, tenantSlug, authorHandle, teamSlug, kullaniciAdi
+  return w.length >= 2 && IDENTITY_WORDS.has(w[w.length - 2]!) && ["name", "login", "slug", "handle", "key", "adi", "adı", "nombre", "nom"].includes(last);
+}
+
+/** A key that is only `from`, `to` or `by`: an identity key whose values are often words of the app. */
+function weakIdentityKey(key: string | undefined): boolean {
+  if (!key) return false;
+  const w = words(key.replace(/^x-/, ""));
+  return w.length === 1 && WEAK_IDENTITY_KEYS.has(w[0]!);
+}
+
+function weakIdKey(key: string | undefined): boolean {
+  if (!key) return false;
+  const w = words(key);
+  return WEAK_ID_WORDS.has(w[w.length - 1] ?? "");
 }
 
 /**
@@ -314,7 +340,16 @@ export class TaintCollector {
     const usable = len >= 3 && !COMMON.has(lower) && !VERSIONISH.test(v);
     if (usable && len >= 4 && key && isSensitiveName(key)) this.taint.secrets.add(lower);
     // Identities: user/tenant names, and string ids ("ACPVVW" under `id`) — whatever they look like, in any script.
-    if (usable && (isIdentityKey(key) || keyKind(key) === 2) && !/\s/.test(v) && /\p{L}/u.test(v) && !/^\d{4}-\d{2}/.test(v) && !(!isIdentityKey(key) && /^[A-Z]{2,4}$/.test(v))) this.identity(lower);
+    // A route ("/orders", "src/main.ts") is never a name, and a plain word under `ref` or `number` is the
+    // app's vocabulary (`ref=main`, `?ref=search`).
+    if (usable && (isIdentityKey(key) || keyKind(key) === 2) && !/\s/.test(v) && /\p{L}/u.test(v) && !/^\d{4}-\d{2}/.test(v) && !(!isIdentityKey(key) && /^[A-Z]{2,4}$/.test(v)) && !v.includes("/")) {
+      if (!(!isIdentityKey(key) && weakIdKey(key) && !/\p{Nd}/u.test(v) && !isDataLike(v))) {
+        const had = this.taint.identities.has(lower);
+        this.identity(lower);
+        // `from`, `to`, `by`: kept only while the capture doesn't use the word as one of its endpoints.
+        if (!had && weakIdentityKey(key)) this.weakOnly.add(lower);
+      }
+    }
     // An email's local part is often reused as a username elsewhere in the same app
     // ("okilic@corp.example" → "/people/okilic/…"), whatever key the email sat under.
     if (isEmail(v)) {
@@ -322,7 +357,7 @@ export class TaintCollector {
       if (local.length >= 3 && !COMMON.has(local) && !ROLE_MAILBOX.has(local) && /[a-z]/.test(local)) {
         const had = this.taint.identities.has(local);
         this.identity(local);
-        if (!had) this.localOnly.add(local);
+        if (!had) this.weakOnly.add(local);
       }
     }
     // A bare string in a people collection's response (GET /api/users → ["ece.kaya", "zkaya"]) names a person.
@@ -331,7 +366,12 @@ export class TaintCollector {
       if (len >= 4) this.taint.values.add(lower);
       return;
     }
-    const personal = len >= 4 && usable && keyKind(key) !== 0;
+    // A plain word under `ref` or `number` (`?ref=search`, `ref=main`) is the app's vocabulary, not an id.
+    // Under `from`, `to` or `by` a plain word is tracked as a weak identity below, not as personal data, so
+    // that the capture's own endpoints can rule it out.
+    const plainWord = !/\p{Nd}/u.test(v) && !isDataLike(v);
+    const wordUnderWeakId = !isIdentityKey(key) && weakIdKey(key) && plainWord;
+    const personal = len >= 4 && usable && keyKind(key) !== 0 && !wordUnderWeakId && !(weakIdentityKey(key) && plainWord);
     // A thing's one-word name (a category "Books", a repository "dotfiles"): a label, not personal data.
     if (personal && !person && nameOnlyKey(key) && !/\s/.test(v) && !isDataLike(v)) {
       this.taint.labels.add(lower);
@@ -400,11 +440,14 @@ export class TaintCollector {
     }
   }
 
-  /** Identities known only as an email's local part (cart@supplier.example). */
-  readonly localOnly = new Set<string>();
+  /**
+   * Identities known only from weak evidence: an email's local part (cart@supplier.example) or a value under
+   * `from`, `to` or `by` ({"from":"search"}). See the end of collectTaint.
+   */
+  readonly weakOnly = new Set<string>();
 
   private identity(lower: string): void {
-    this.localOnly.delete(lower);
+    this.weakOnly.delete(lower);
     if (this.taint.identities.has(lower)) return;
     this.taint.identities.add(lower);
     const form = aliasOf(lower);
@@ -442,9 +485,10 @@ export class TaintCollector {
     else if (isObject(value)) {
       const here = person || personObject(value);
       this.joinedNames(value);
+      const dataKeys = new Set(dataKeysOf(Object.keys(value)));
       for (const [k, v] of Object.entries(value)) {
         if (skip?.(k, depth, value)) continue;
-        if (isDataKey(k)) this.add(k, "key");
+        if (dataKeys.has(k)) this.add(k, "key");
         this.json(v, k, depth + 1, skip, here || (typeof v === "object" && v !== null && personWord(k)));
       }
     }
@@ -556,7 +600,7 @@ export function collectTaint(exchanges: Exchange[], evidence: Exchange[] = []): 
       if (name === "cookie") {
         for (const part of value.split(";")) {
           const i = part.indexOf("=");
-          if (i > 0) c.add(part.slice(i + 1), "cookie");
+          if (i > 0) addCookie(c, part.slice(0, i), part.slice(i + 1));
         }
         continue;
       }
@@ -584,12 +628,22 @@ export function collectTaint(exchanges: Exchange[], evidence: Exchange[] = []): 
         const person = personPath(ex.pathname);
         if (Array.isArray(v)) for (const item of v.slice(0, 2000)) c.json(item, undefined, 0, skipProtocolKeys, person);
         else c.json(v, undefined, 0, skipProtocolKeys, person);
-        // Inline literals in GraphQL documents are data too.
+        // Inline literals in GraphQL documents are data too, and so is each variable under the argument it feeds.
         for (const doc of graphqlDocs(v)) graphqlLiterals(doc, c);
+        graphqlVariableArgs(v, c);
       } else if (body.kind === "form" || (body.kind === "multipart" && body.fields)) {
         for (const [k, v] of body.fields ?? []) {
           for (const part of k.split(/[[\]]+/)) if (part && (isDataKey(part) || isDataLike(part))) c.add(part, "key");
           c.add(v, k);
+          // JSON in a field (Slack's `payload`, a GraphQL multipart upload's `operations`), as for a query parameter.
+          if (/^\s*[[{]/.test(v)) {
+            const doc = parseJson(v.slice(0, 2_000_000));
+            if (doc !== NOT_JSON) {
+              c.json(doc, k, 0, skipProtocolKeys, true);
+              for (const d of graphqlDocs(doc)) graphqlLiterals(d, c);
+              graphqlVariableArgs(doc, c);
+            }
+          }
         }
       } else if ((body.kind === "text" || body.kind === "unparsed") && csvRows(body.raw)) {
         // CSV: cells under personal columns are data whatever they look like.
@@ -604,12 +658,23 @@ export function collectTaint(exchanges: Exchange[], evidence: Exchange[] = []): 
         // Script and style contents are raw text up to their end tag ("a < b" doesn't open a tag), so they
         // are cut out before the markup is read.
         const { prose, scripts } = splitScripts(body.raw.slice(0, 200_000));
-        for (const script of scripts) for (const doc of jsonIn(script)) c.json(doc, undefined, 0, skipProtocolKeys, person);
+        for (const script of scripts) for (const doc of scriptJson(script)) c.json(doc, undefined, 0, skipProtocolKeys, person);
         mapTextFields(prose, (v, k) => {
-          if (typeof v === "string") c.add(v, k);
-          else if (typeof v === "number") c.addNumber(v, k);
+          if (typeof v === "string") {
+            c.add(v, k);
+            // JSON in an attribute (data-props="{&quot;viewer&quot;:…}", already unescaped here).
+            if (/^\s*[[{]/.test(v)) {
+              const doc = parseJson(v);
+              if (doc !== NOT_JSON) c.json(doc, undefined, 0, skipProtocolKeys, person);
+            }
+          } else if (typeof v === "number") c.addNumber(v, k);
           return v;
         });
+        // <meta name="user-login" content="…">, <input name="username" value="…">: the value under the name.
+        for (const [k, v] of namedValues(prose)) {
+          c.add(v, k);
+          if (isIdentityKey(k)) c.addAlways(v, true);
+        }
         for (const w of prose.match(/[^\s"'<>,;()[\]{}]{5,}/g) ?? []) if (isDataLike(w)) c.add(w);
         // Server-sent events and JSON lines: each `data:` line or line is a JSON document.
         for (const doc of jsonLines(body.raw)) c.json(doc, undefined, 0, skipProtocolKeys, person);
@@ -617,14 +682,17 @@ export function collectTaint(exchanges: Exchange[], evidence: Exchange[] = []): 
     }
     // WebSocket frames, NDJSON bodies: the same documents, read as evidence only.
     for (const text of ex.evidence ?? []) {
-      const whole = /^\s*[[{]/.test(text) ? parseJson(text) : NOT_JSON;
-      const docs = whole !== NOT_JSON ? [whole] : jsonLines(text);
+      const { docs, pairs } = frameContents(text);
       for (const doc of docs) c.json(doc, undefined, 0, skipProtocolKeys, personPath(ex.pathname));
+      for (const [k, v] of pairs) {
+        c.add(v, k);
+        if (isIdentityKey(k)) c.addAlways(v, true);
+      }
     }
     for (const [name, value] of ex.responseHeaders) {
       if (name === "set-cookie") {
         const i = value.indexOf("=");
-        if (i > 0) c.add(value.slice(i + 1).split(";")[0] ?? "", "cookie");
+        if (i > 0) addCookie(c, value.slice(0, i), value.slice(i + 1).split(";")[0] ?? "");
         continue;
       }
       if (name === "location" || name === "content-location") {
@@ -648,18 +716,19 @@ export function collectTaint(exchanges: Exchange[], evidence: Exchange[] = []): 
       }
     }
   }
-  // A mailbox named like one of the API's own resources (cart@supplier.example next to GET /api/v1/cart)
-  // is not the user's name in that path: the capture uses the word as an endpoint, as the last segment of
-  // a generated path and not as a member of a collection (/people/okilic) or after a person word (/user/okilic).
-  if (c.localOnly.size) {
+  // An identity known only from weak evidence (a mailbox cart@supplier.example, {"from":"search"}, `to=orders`)
+  // that the capture uses as one of its own endpoints (GET /api/v1/cart) is that endpoint's word, not the user's
+  // name: the last segment of a generated path, and not as a member of a collection (/people/okilic) or after a
+  // person word (/user/okilic).
+  if (c.weakOnly.size) {
     for (const ex of exchanges) {
       const segs = ex.pathname.toLowerCase().split("/").filter(Boolean);
       const last = segs[segs.length - 1];
       const prev = segs[segs.length - 2];
-      if (!last || !c.localOnly.has(last) || !/^\p{L}+$/u.test(last)) continue;
+      if (!last || !c.weakOnly.has(last) || !/^\p{L}+$/u.test(last)) continue;
       if (prev && (isPlural(prev) || personWord(prev))) continue;
       c.taint.identities.delete(last);
-      c.localOnly.delete(last);
+      c.weakOnly.delete(last);
     }
   }
   return c.taint;
@@ -677,6 +746,154 @@ const RESPONSE_STRUCTURE_HEADERS =
   /^(date|expires|last-modified|age|etag|vary|server|via|alt-svc|content-.*|cache-control|pragma|connection|keep-alive|transfer-encoding|strict-transport-security|access-control-.*|x-content-type-options|x-frame-options|x-xss-protection|referrer-policy|permissions-policy|cross-origin-.*|report-to|nel|timing-allow-origin|accept-ranges|link|upgrade|:.*)$/;
 
 const MAX_DOCS = 5000;
+
+/** A cookie: its value as sent, decoded once and unquoted (Segment's ajs_user_id=%22okilic%22), under its name too. */
+function addCookie(c: TaintCollector, rawName: string, rawValue: string): void {
+  const name = rawName.trim();
+  const raw = rawValue.trim();
+  c.add(raw, "cookie");
+  let v = raw;
+  if (/%[0-9A-Fa-f]{2}/.test(v)) {
+    try {
+      v = decodeURIComponent(v);
+    } catch {
+      /* keep */
+    }
+  }
+  v = v.replace(/^"(.*)"$/s, "$1");
+  if (v !== raw) c.add(v, "cookie");
+  if (name) {
+    c.add(v, name);
+    if (isIdentityKey(name)) c.addAlways(v, true);
+  }
+  if (/^[[{]/.test(v)) {
+    const doc = parseJson(v);
+    if (doc !== NOT_JSON) c.json(doc, name, 0, skipProtocolKeys, true);
+  }
+}
+
+/**
+ * The documents and header pairs in a WebSocket frame or an evidence text, under the framings apps use:
+ * SignalR's record separator (\u001e, anywhere), SockJS (`a["…"]`, a list of messages as strings),
+ * Engine.IO / Socket.IO packet prefixes (`42["event",{…}]`, `42/chat,7[…]`), STOMP-style frames (a command,
+ * `key:value` header lines, a blank line, a body), plain JSON and JSON lines.
+ */
+function frameContents(text: string, depth = 0): { docs: unknown[]; pairs: [string, string][] } {
+  const docs: unknown[] = [];
+  const pairs: [string, string][] = [];
+  const pieces = text.slice(0, 2_000_000).split("\u001e");
+  for (const piece of pieces.slice(0, MAX_DOCS)) {
+    let t = piece.replace(/\u0000+$/, "").trim();
+    if (!t) continue;
+    const sockjs = /^a(\[[\s\S]*\])$/.exec(t);
+    if (sockjs && depth < 2) {
+      const list = parseJson(sockjs[1]!);
+      if (Array.isArray(list)) {
+        for (const m of list.slice(0, MAX_DOCS)) {
+          if (typeof m !== "string") continue;
+          const inner = frameContents(m, depth + 1);
+          docs.push(...inner.docs);
+          pairs.push(...inner.pairs);
+        }
+        continue;
+      }
+    }
+    const engine = /^\d{1,3}(?:\/[^,[{]{0,200},)?\d{0,12}(?=[[{])/.exec(t);
+    if (engine) t = t.slice(engine[0].length);
+    if (/^[[{]/.test(t)) {
+      const doc = parseJson(t);
+      if (doc !== NOT_JSON) {
+        docs.push(doc);
+        continue;
+      }
+    }
+    const lines = jsonLines(t);
+    if (lines.length) {
+      docs.push(...lines);
+      continue;
+    }
+    // A STOMP-style frame: header lines up to the first blank line, then a body (JSON or not).
+    const all = t.split(/\r?\n/);
+    let k = 0;
+    for (; k < all.length && k < 256; k++) {
+      const line = all[k]!;
+      if (!line) break;
+      const h = /^([A-Za-z][\w.-]{0,63}):(.{1,4000})$/.exec(line);
+      if (h) pairs.push([h[1]!, h[2]!.trim()]);
+    }
+    const body = all.slice(k + 1).join("\n").trim();
+    if (/^[[{]/.test(body)) {
+      const doc = parseJson(body);
+      if (doc !== NOT_JSON) docs.push(doc);
+    }
+  }
+  return { docs, pairs };
+}
+
+/**
+ * The JSON in a script: objects and arrays written into it (jsonIn), and JSON held in its string
+ * literals: `JSON.parse("{\"viewer\":…}")`, Next.js flight chunks (`self.__next_f.push([1,"3:{…}\n"])`,
+ * one `id:` prefixed row per line).
+ */
+function scriptJson(script: string): unknown[] {
+  const out = jsonIn(script);
+  for (const s of stringLiterals(script)) {
+    for (const row of s.split("\n").slice(0, MAX_DOCS)) {
+      const t = row.replace(/^[0-9a-f]{1,8}:(?=[[{])/i, "").trim();
+      if (!/^[[{]/.test(t)) continue;
+      const doc = parseJson(t);
+      if (doc !== NOT_JSON && doc !== null && typeof doc === "object") out.push(doc);
+      else for (const d of jsonIn(t)) out.push(d);
+      if (out.length >= 200) return out;
+    }
+  }
+  return out;
+}
+
+/**
+ * The contents of a script's quoted string literals that may hold JSON (they contain "{" or "["),
+ * unescaped. One pass; at most 200 literals.
+ */
+function stringLiterals(script: string): string[] {
+  const out: string[] = [];
+  const t = script.length > 1_000_000 ? script.slice(0, 1_000_000) : script;
+  for (let i = 0; i < t.length && out.length < 200; i++) {
+    const q = t[i];
+    if (q !== '"' && q !== "'") continue;
+    let j = i + 1;
+    let interesting = false;
+    for (; j < t.length && t[j] !== q && t[j] !== "\n"; j++) {
+      if (t[j] === "\\") j++;
+      else if (t[j] === "{" || t[j] === "[") interesting = true;
+    }
+    if (interesting && t[j] === q) {
+      const body = t.slice(i + 1, j);
+      // JS escapes as JSON escapes; \' and \xNN are JS-only.
+      const json = '"' + body.replace(/\\'/g, "'").replace(/\\x([0-9A-Fa-f]{2})/g, "\\u00$1").replace(/(^|[^\\])"/g, '$1\\"') + '"';
+      const v = parseJson(json);
+      if (typeof v === "string") out.push(v);
+    }
+    i = j;
+  }
+  return out;
+}
+
+const NAMED_VALUE_TAG = /<(?:meta|input|param|data|option|button|textarea|output|select)\b[^>]*>/gi;
+const TAG_ATTRIBUTE = /([\w:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g;
+
+/** `<meta name="user-login" content="okilic">`, `<input name="username" value="okilic">`: [name, value] pairs. */
+function namedValues(markup: string): [string, string][] {
+  const out: [string, string][] = [];
+  for (const m of markup.matchAll(NAMED_VALUE_TAG)) {
+    if (out.length >= 5000) break;
+    const attrs = new Map<string, string>();
+    for (const a of m[0].matchAll(TAG_ATTRIBUTE)) attrs.set(a[1]!.toLowerCase(), decodeEntities(a[2] ?? a[3] ?? a[4] ?? ""));
+    const name = attrs.get("name") ?? attrs.get("property") ?? attrs.get("itemprop");
+    const value = attrs.get("content") ?? attrs.get("value");
+    if (name && value) out.push([name, value]);
+  }
+  return out;
+}
 
 /**
  * Markup without its <script> and <style> elements, and the contents of the scripts. Their contents are
@@ -893,6 +1110,26 @@ function graphqlLiterals(doc: string, c: TaintCollector): void {
     } else if (m[2] !== undefined) c.addAlways(m[2].trim(), identity);
     else if (m[3] !== undefined) c.addAlways(m[3], identity);
     else if (m[4] !== undefined && isGraphqlDataNumber(m[1], Number(m[4])) && digitCount(m[4]) >= 4) c.taint.values.add(m[4].toLowerCase());
+  }
+}
+
+/**
+ * GraphQL variables under the argument they are passed to: `up(owner: $o)` with `{"o":"okilic"}` is
+ * `owner: "okilic"`, an identity whatever the variable is called. Batches too.
+ */
+function graphqlVariableArgs(body: unknown, c: TaintCollector): void {
+  for (const op of (Array.isArray(body) ? body : [body]).slice(0, 200)) {
+    if (!isObject(op) || typeof op.query !== "string" || !isObject(op.variables)) continue;
+    const vars = op.variables as Record<string, unknown>;
+    for (const m of op.query.slice(0, 200_000).matchAll(/([A-Za-z_]\w{0,63})\s*:\s*\$([A-Za-z_]\w{0,63})/g)) {
+      const arg = m[1]!;
+      const value = Object.prototype.hasOwnProperty.call(vars, m[2]!) ? vars[m[2]!] : undefined;
+      for (const x of Array.isArray(value) ? value.slice(0, 200) : [value]) {
+        if (typeof x !== "string") continue;
+        c.add(x, arg);
+        if (isIdentityKey(arg)) c.addAlways(x, true);
+      }
+    }
   }
 }
 
@@ -1165,10 +1402,14 @@ export function scanText(input: string, taint: Taint | undefined, where: string,
     if (taint.allowed.has(v) || ignore?.has(v)) continue;
     const parts = v.split(TOKEN_SPLIT).filter(Boolean);
     if (!parts.length) continue;
+    // A value that is itself one of the text's tokens is in the text: no search needed (searching the whole
+    // text once per recorded value was values × text).
+    const direct = parts.length === 1 && parts[0] === v && tokens.has(v);
     if (
-      parts.length === 1
+      direct ||
+      (parts.length === 1
         ? (tokens.has(trimDotsDashesTildes(parts[0]!)) || inPieces(taint, pieces, v)) && lower.includes(v)
-        : parts.every((p) => tokens.has(trimDotsDashesTildes(p))) && lower.includes(v)
+        : parts.every((p) => tokens.has(trimDotsDashesTildes(p))) && lower.includes(v))
     ) {
       found.push({ where, preview: maskPreview(v), kind: "value" });
       hit.add(aliasOf(v));
@@ -1213,7 +1454,8 @@ export function scrubText(text: string, taint: Taint | undefined): string {
   for (const v of recordedValues(taint)) {
     if (taint.allowed.has(v)) continue;
     const parts = v.split(TOKEN_SPLIT).filter(Boolean);
-    if (parts.length && (parts.every((p) => tokens.has(trimDotsDashesTildes(p))) || (parts.length === 1 && inPieces(taint, pieces, v))) && lower.includes(v)) findings.add(v);
+    if (parts.length === 1 && parts[0] === v && tokens.has(v)) findings.add(v);
+    else if (parts.length && (parts.every((p) => tokens.has(trimDotsDashesTildes(p))) || (parts.length === 1 && inPieces(taint, pieces, v))) && lower.includes(v)) findings.add(v);
   }
   for (const t of tokens) if (/[._\-]/.test(t) && !taint.allowed.has(t) && !hostLabels(taint).has(t) && taint.identityForms.has(aliasOf(t))) findings.add(t);
   // A value is also redacted as it is written escaped (a property key: synthetic\"secret).
