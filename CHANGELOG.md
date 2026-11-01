@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.6.13
+
+Fixes from an eighteenth review: a read-only review by Codex of the 0.6.12 changes only (`v0.6.11..666dcab`). Twelve findings: four privacy regressions from 0.6.12's relaxations for normal apps, two false refusals, three correctness and performance problems, and three gaps in the new carriers. Each was reproduced here with the reviewer's input before it was fixed. Tests are in `test/review18.test.ts`, with generated variants; 26 of its 34 tests fail on 0.6.12. `test/fixtures/demo-snapshot.json` is unchanged.
+
+**Security**
+- A sender under `from` was forgotten when its username ended a path under another word: `[{"from":"parker"}]` next to `GET /api/v1/inbox/parker` was written as `getParker` (0.6.11 refused). A weak identity is now dropped only for a top-level endpoint of that name, the path's last segment right after the API root or a version (`/api/v1/search`, `/orders`); the same rule applies to an email's local part (A1).
+- `reservationRef: "orchid"` was treated as vocabulary like `?ref=main`, so `/bookings/orchid` stayed literal. Only a bare `ref`, `reference`, `number`, `no`, `nr` or `num` key is weak now; `reservationRef`, `orderNumber`, `ticketNo` name a record (A2).
+- A username key with digits among ordinary keys (`{"parker2026":{"online":true},"total":1}`) became a property, and the mock replayed it. A key that only mixes letters and digits is data when its value is an object or a list, as well as in the 0.6.12 cases; `"thumb_200": "https://…"` stays a property (A3).
+- `last_order_by` (who placed the last order) was exempted as an ordering key. Only `sort_by`, `orderBy` and the like, exactly two words, are ordering keys now (A4).
+- An empty string in single-quoted script JSON (`JSON.parse('{"login":"…","bio":""}')`) made the whole literal unreadable. Script string literals are now unescaped in one forward pass, with every JavaScript escape (D1).
+- GraphQL over GET didn't bind `variables` to the arguments they feed, as POST bodies do since 0.6.12. It does now (D2).
+- Express `j:` JSON cookies (`prefs=j%3A%7B…%7D`) were decoded but not parsed, and `s:` signed values kept their signature. Both are unwrapped now (D3).
+
+**Correctness**
+- French `identifiant` refused a normal catalogue (`{"identifiant":"catalogue"}`): it is any record's identifier, not a login. It is no longer an identity key (B1).
+- A second `?from=search` promoted the weak identity to a strong one, so the shop was refused again. Repeating weak evidence keeps it weak; only a strong source (`login`, `owner`…) wins (B2).
+- The mock renamed a compound key (`user:parker`) in a superjson payload but not in its `meta.values` path. Both use the same renaming now (C2).
+- A GraphQL comment (`# owner: $o`) or a string was read as an argument binding, refusing a normal app. Bindings are read from the document with comments and strings blanked out; `owner: # note` followed by `$o` on the next line still binds (C3).
+
+**Slow inputs**
+- The `<meta>` / `<input>` attribute reader added in 0.6.12 was quadratic on a long attribute name without "=": 160,000 characters took 16 s (11 ms in 0.6.11). Its regex starts only where a name starts now: 0.16 s here for 80,000 (C1).
+
+**Behaviour changes**
+- Fewer weak identities are dropped: a word under `from`, `to` or `by` that names an endpoint nested under another word (`/inbox/parker`) stays an identity, so such captures are refused or templated as in 0.6.11.
+- An object with a digit-bearing key that holds a record is a `Record` again in `client.ts`, `openapi.json` and the mock.
+- `identifiant` is no longer an identity key.
+
+**Docs**
+- SECURITY.md describes the top-level-endpoint rule, the bare weak keys, the record-valued dictionary rule, Express cookies and GraphQL GET bindings.
+
 ## 0.6.12
 
 Fixes from a seventeenth review: an independent read-only review by Claude Code of 0.6.11, before launch. Fourteen findings (eight leaks, two wrong outputs, one integrity, two quality, one slow input) and the claims they falsified. Each was reproduced here with the reviewer's input before it was fixed. Tests are in `test/review17.test.ts`, with generated variants; 61 of its 71 tests fail on 0.6.11. `test/fixtures/demo-snapshot.json` is unchanged.

@@ -144,7 +144,8 @@ describe("L2: page JSON in common shapes", () => {
   });
 });
 
-const IDENTITY_KEYS = ["kullaniciAdi", "kullanici_adi", "sahip", "yazar", "benutzername", "benutzer", "besitzer", "usuario", "autor", "propietario", "pseudo", "utilisateur", "identifiant", "auteur", "proprietaire"];
+// `identifiant` was here until review 18 (B1): in French it is any record's identifier, not a person's login.
+const IDENTITY_KEYS = ["kullaniciAdi", "kullanici_adi", "sahip", "yazar", "benutzername", "benutzer", "besitzer", "usuario", "autor", "propietario", "pseudo", "utilisateur", "auteur", "proprietaire"];
 
 describe("L3: identity keys in Turkish, German, Spanish and French", () => {
   for (const key of IDENTITY_KEYS) {

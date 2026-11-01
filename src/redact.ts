@@ -314,8 +314,9 @@ export function isPersonalName(name: string): boolean {
 
 /** `sort_by`, `orderBy`, `group_by`: the name of a field to order or group by, never a person. */
 export function isOrderingKey(name: string): boolean {
+  // Exactly two words: `last_order_by` (who placed the last order) is an actor, not an ordering control.
   const w = words(name);
-  return w.length >= 2 && w[w.length - 1] === "by" && /^(sort|order|group|filter|split|partition|index|search|rank|pivot|aggregate)$/.test(w[w.length - 2]!);
+  return w.length === 2 && w[1] === "by" && /^(sort|order|group|filter|split|partition|index|search|rank|pivot|aggregate)$/.test(w[0]!);
 }
 
 /** Words of a key that holds (part of) a person's name rather than their contact details. */
@@ -366,10 +367,15 @@ export function weakDataKeysMakeDictionary(keys: string[]): boolean {
   return weak > 0 && weak * 2 >= keys.length && (weak >= 2 || keys.length === 1);
 }
 
-/** The keys of an object that are data: strong ones always, weak ones when they make it a dictionary. */
-export function dataKeysOf(keys: string[]): string[] {
+/**
+ * The keys of an object that are data: strong ones always; a key that only mixes letters and digits when such
+ * keys make the object a dictionary, or when its value is an object or a list. An entry keyed by something
+ * (`"parker2026": {"online": true}`) holds a record; a property (`"thumb_200": "https://…"`) holds a value.
+ * @param structured is the value under this key an object or a list?
+ */
+export function dataKeysOf(keys: string[], structured?: (key: string) => boolean): string[] {
   const weak = weakDataKeysMakeDictionary(keys);
-  return keys.filter((k) => isStrongDataKey(k) || (weak && isDataKey(k)));
+  return keys.filter((k) => isStrongDataKey(k) || (isDataKey(k) && (weak || !!structured?.(k))));
 }
 
 /** A key that is a datum (an email, a phone number, an id), not a property name. */
@@ -447,7 +453,9 @@ export class Scrubber {
       .map((seg) => {
         const raw = seg.replace(/\\(.)/g, "$1");
         const data = isEmail(raw) || isDataKey(raw) || this.identity?.(raw) || this.alias?.(raw) || this.value?.(raw) || (this.recorded?.(raw) && !this.label?.(raw));
-        return data ? (isEmail(raw) ? this.fakeEmail(raw) : this.fake(raw)).replace(/[\\.]/g, "\\$&") : seg;
+        // The same renaming as the payload's keys: a whole data key is faked, a compound one in its parts.
+        const renamed = data ? (isEmail(raw) ? this.fakeEmail(raw) : this.fake(raw)) : this.compoundKey(raw);
+        return renamed === raw ? seg : renamed.replace(/[\\.]/g, "\\$&");
       })
       .join(".");
   }
@@ -473,8 +481,9 @@ export class Scrubber {
     // same-shaped entries recorded as data): every key is data.
     const sig = (v: unknown) => (isObject(v) ? Object.keys(v as object).sort().join(",") : Array.isArray(v) ? "[]" : typeof v);
     const keys = entries.map(([k]) => k);
+    const structured = new Set(entries.filter(([, v]) => typeof v === "object" && v !== null).map(([k]) => k));
     const dict =
-      dataKeysOf(keys).length > 0 ||
+      dataKeysOf(keys, (k) => structured.has(k)).length > 0 ||
       entries.some(([k]) => isEmail(k) || this.identity?.(k) || this.alias?.(k) || this.value?.(k) || (isDataKey(k) && !!this.recorded?.(k))) ||
       (entries.length >= 2 && entries.every(([k, v]) => this.recorded?.(k) && !this.label?.(k) && sig(v) === sig(entries[0]![1])));
     for (const [k, v] of entries) setOwn(out, dict ? (isEmail(k) ? this.fakeEmail(k) : this.fake(k)) : this.compoundKey(k), this.json(v, k, depth + 1, personal && isObject(v), record));

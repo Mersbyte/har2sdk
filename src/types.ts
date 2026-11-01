@@ -160,7 +160,7 @@ export class TypeRegistry {
     // A key that is shaped like data, or that the capture uses as a user/tenant name.
     // (A key that only mixes letters and digits, `thumb_200`, counts when such keys are most of the object's keys,
     // or when it was recorded as data elsewhere: one among ordinary property names is a property name.)
-    if (dataKeysOf(keys).length || keys.some((k) => isIdentity(this.taint, k) || isAliasRecorded(this.taint, k) || (isDataKey(k) && isTainted(this.taint, k)))) return true;
+    if (dataKeysOf(keys, (k) => { const p = obj.props.get(k); return !!(p?.object || p?.array); }).length || keys.some((k) => isIdentity(this.taint, k) || isAliasRecorded(this.taint, k) || (isDataKey(k) && isTainted(this.taint, k)))) return true;
     // A key that is, character for character, a secret recorded under a token/password/key field, even when
     // it is the object's only key. (A key that merely shares a word with a recorded name keeps its property.)
     if (keys.some((k) => this.taint?.secrets.has(k.trim().toLowerCase()))) return true;
