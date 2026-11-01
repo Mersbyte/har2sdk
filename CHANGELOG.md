@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.14
+
+The leak guard can't recognise a value that has no evidence in the capture: a plain word used once as a path segment (`GET /api/v1/profiles/parker` that nothing else names) stays a literal and is written into `client.ts` (`getParker()`). That limit is documented (SECURITY.md, *Limits*), and review rounds kept finding new variants of it; only the user knows whether `parker` is a name. har2sdk now shows the user every literal path word it wrote, the risky ones first. Nothing the leak guard detects, templates or refuses has changed. Tests are in `test/literal-words.test.ts`, with a generated variant. `test/fixtures/demo-snapshot.json` is unchanged.
+
+**Added**
+- `har2sdk <har> -o <dir>` prints, after the written files, the path words written into `client.ts`: the ones seen in only one recorded request path first, then up to 20 others ("+N more: har2sdk inspect"), and a `--param` pattern that would make the first such word a parameter. Words are counted by the distinct recorded paths (before templating) that contain them as a segment, not judged by their shape. The API root and version segments (`api`, `rest`, `graphql`, `v1`, `v2.1`, `2024-01`) aren't listed; words are deduplicated without regard to case.
+- `har2sdk inspect` prints the full list with each word's count; `inspect --json` has it as `pathWords: [{ "word": "parker", "requests": 1 }, …]` (single-use first, then alphabetical), redacted like the rest of that output.
+- The MCP `analyze_har` and `generate_sdk` responses include the short list, redacted like the rest of the response: a word the guard knows shows as `<redacted>`.
+- Control and format characters in a listed word (an ANSI escape, a bidi override) are shown as `\u{…}` escapes in the terminal.
+
+**Not changed**
+- The list is advice for the user, not part of the generated code: `client.ts` and `openapi.json` don't contain it. Exit codes, templating and the leak guard are as in 0.6.13.
+
+**Docs**
+- README (Privacy) and SECURITY.md (*Limits*) describe the list and what it doesn't do.
+
 ## 0.6.13
 
 Fixes from an eighteenth review: a read-only review by Codex of the 0.6.12 changes only (`v0.6.11..666dcab`). Twelve findings: four privacy regressions from 0.6.12's relaxations for normal apps, two false refusals, three correctness and performance problems, and three gaps in the new carriers. Each was reproduced here with the reviewer's input before it was fixed. Tests are in `test/review18.test.ts`, with generated variants; 26 of its 34 tests fail on 0.6.12. `test/fixtures/demo-snapshot.json` is unchanged.

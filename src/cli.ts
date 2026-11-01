@@ -14,6 +14,7 @@ import { loadHarFile, mergeExchanges } from "./har.js";
 import { buildPlan, checkBaseUrl, type Plan } from "./plan.js";
 import { authSummary, renderChatPrompt } from "./summary.js";
 import { scrubText } from "./leak.js";
+import { literalPathWords, renderPathWords, visibleWord } from "./pathwords.js";
 import { c, guardTerminal, kb, methodColor, pad, stripControl } from "./term.js";
 
 const HELP = `
@@ -157,6 +158,8 @@ async function main(argv: string[]): Promise<number> {
             auth: model.auth,
             defaultHeaders: model.defaultHeaders,
             warnings: plan.warnings,
+            // Single-use words first: the leak guard can't recognise a word with no evidence (see SECURITY.md, Limits).
+            pathWords: literalPathWords(plan, exchanges),
             endpoints: plan.ops.map((o) => ({
               id: o.ep.id,
               method: o.ep.method,
@@ -176,6 +179,7 @@ async function main(argv: string[]): Promise<number> {
       // The same notes `generate` prints (an unmatched --param, dropped telemetry…).
       if (plan.warnings.length) console.log("");
       for (const w of plan.warnings) console.log(`  ${c.yellow("!")} ${w}`);
+      printPathWords(renderPathWords(plan, literalPathWords(plan, exchanges), { show: visibleWord, counts: true }));
     }
     return 0;
   }
@@ -249,6 +253,7 @@ async function main(argv: string[]): Promise<number> {
     console.log(`  ${c.green("✓")} ${pad(relative(process.cwd(), file) || file, 34)} ${pad(kb(size), 9)} ${extra}`);
   }
   for (const w of result.warnings) console.log(`  ${c.yellow("!")} ${w}`);
+  printPathWords(renderPathWords(result.plan, literalPathWords(result.plan, exchanges), { limit: 20, show: visibleWord }));
   const rel = relative(process.cwd(), outDir) || ".";
   const label = (s: string) => pad(c.bold(s), 14);
   console.log(`
@@ -294,6 +299,14 @@ function printOverview(plan: Plan, source: string): void {
     const host = op.foreignOrigin ? c.dim(new URL(op.foreignOrigin).host) : "";
     console.log(`  ${methodColor(op.ep.method)} ${host}${pad(path, width)} ${pad(c.cyan(op.ep.name), 28)} ${c.dim("×" + op.ep.count)}`);
   }
+}
+
+/** The path-word section (see pathwords.ts); its words are already escaped by {@link visibleWord}. */
+function printPathWords(lines: string[]): void {
+  if (!lines.length) return;
+  const [head, ...rest] = lines;
+  console.log(`\n  ${c.bold(head!)}`);
+  for (const l of rest) console.log(`  ${l.startsWith("  A word") ? c.dim(l) : l}`);
 }
 
 function highlightParams(path: string): string {
