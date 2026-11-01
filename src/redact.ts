@@ -308,7 +308,14 @@ const PERSONAL_WORDS = new Set([
  * turn `customerName` into `"Ayse" | "Mehmet"`).
  */
 export function isPersonalName(name: string): boolean {
+  if (isOrderingKey(name)) return false;
   return words(name).some((w) => PERSONAL_WORDS.has(w));
+}
+
+/** `sort_by`, `orderBy`, `group_by`: the name of a field to order or group by, never a person. */
+export function isOrderingKey(name: string): boolean {
+  const w = words(name);
+  return w.length >= 2 && w[w.length - 1] === "by" && /^(sort|order|group|filter|split|partition|index|search|rank|pivot|aggregate)$/.test(w[w.length - 2]!);
 }
 
 /** Words of a key that holds (part of) a person's name rather than their contact details. */
@@ -340,6 +347,30 @@ const PREFIXED_KEY = /^[A-Za-z]{1,6}_(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{6,}$/;
 const ID_KEY = /^(\p{Nd}+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{24})$/iu;
 
 const PROPERTYISH = /^([a-z]+\d{0,3}([A-Z][a-z]+\d{0,3})*|([A-Z][a-z]+\d{0,3})+|[a-z]+\d{0,3}([_-][a-z]+\d{0,3})*|[A-Z]+\d{0,3}(_[A-Z]+\d{0,3})*)$/;
+
+/** A key that is a datum by its shape alone: an id, an email, a phone number, words with spaces. */
+export function isStrongDataKey(k: string): boolean {
+  if (ID_KEY.test(k) || PREFIXED_KEY.test(k) || isEmail(k)) return true;
+  if (/^\+?[\p{Nd}\s().-]{7,}$/u.test(k) && (k.match(/\p{Nd}/gu) ?? []).length >= 7) return true;
+  return /\s/.test(k.trim());
+}
+
+/**
+ * Do an object's keys that merely mix letters and digits (`thumb_200`, `fy2025`, `zk1234x`) make it a
+ * dictionary? Only when they are most of its keys, two or more, or its only key: one such key among
+ * ordinary property names (`id`, `title`, `thumb_200`, `price`) is a property name too.
+ */
+export function weakDataKeysMakeDictionary(keys: string[]): boolean {
+  let weak = 0;
+  for (const k of keys) if (isDataKey(k) && !isStrongDataKey(k)) weak++;
+  return weak > 0 && weak * 2 >= keys.length && (weak >= 2 || keys.length === 1);
+}
+
+/** The keys of an object that are data: strong ones always, weak ones when they make it a dictionary. */
+export function dataKeysOf(keys: string[]): string[] {
+  const weak = weakDataKeysMakeDictionary(keys);
+  return keys.filter((k) => isStrongDataKey(k) || (weak && isDataKey(k)));
+}
 
 /** A key that is a datum (an email, a phone number, an id), not a property name. */
 export function isDataKey(k: string): boolean {
@@ -441,10 +472,38 @@ export class Scrubber {
     // A dictionary keyed by data (any key an email, id or username, or every key of
     // same-shaped entries recorded as data): every key is data.
     const sig = (v: unknown) => (isObject(v) ? Object.keys(v as object).sort().join(",") : Array.isArray(v) ? "[]" : typeof v);
+    const keys = entries.map(([k]) => k);
     const dict =
-      entries.some(([k]) => isEmail(k) || isDataKey(k) || this.identity?.(k) || this.alias?.(k) || this.value?.(k)) ||
+      dataKeysOf(keys).length > 0 ||
+      entries.some(([k]) => isEmail(k) || this.identity?.(k) || this.alias?.(k) || this.value?.(k) || (isDataKey(k) && !!this.recorded?.(k))) ||
       (entries.length >= 2 && entries.every(([k, v]) => this.recorded?.(k) && !this.label?.(k) && sig(v) === sig(entries[0]![1])));
-    for (const [k, v] of entries) setOwn(out, dict ? (isEmail(k) ? this.fakeEmail(k) : this.fake(k)) : k, this.json(v, k, depth + 1, personal && isObject(v), record));
+    for (const [k, v] of entries) setOwn(out, dict ? (isEmail(k) ? this.fakeEmail(k) : this.fake(k)) : this.compoundKey(k), this.json(v, k, depth + 1, personal && isObject(v), record));
+    return out;
+  }
+
+  /**
+   * A property name that holds a recorded identity or email as one of its parts (`user:mdemir`,
+   * `oguz.kilic@corp.example:prefs`, `mdemir/dotfiles`, `draft:ece_kaya`): those parts are faked, the rest
+   * of the key stays. Other keys are returned unchanged.
+   */
+  compoundKey(k: string): string {
+    if (!this.identity || k.length > 200) return k;
+    let out = k.replace(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g, (e) => (isEmail(e) ? this.fakeEmail(e) : e));
+    const parts = out.split(/([:/|#=@+~,;]|[._-])/);
+    // Runs of up to four word pieces with their separators: ece_kaya as well as mdemir.
+    for (let i = 0; i < parts.length; i += 2) {
+      for (let n = 4; n >= 1; n--) {
+        const end = i + 2 * (n - 1);
+        if (end >= parts.length) continue;
+        const run = parts.slice(i, end + 1).join("");
+        if (!run || run.length < 3 || !this.identity(run)) continue;
+        parts[i] = this.fake(run);
+        for (let j = i + 1; j <= end; j++) parts[j] = "";
+        i = end;
+        break;
+      }
+    }
+    out = parts.join("");
     return out;
   }
 

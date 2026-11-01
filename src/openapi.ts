@@ -21,13 +21,13 @@ export function generateOpenApi(plan: Plan, opts: OpenApiOptions = {}): Record<s
   const gqlOps = ops.filter((o) => o.ep.graphql);
 
   for (const op of restOps) {
-    const item = (paths[op.ep.path] ??= {});
+    const item = (paths[specPath(op.ep)] ??= {});
     putOperation(item, op.ep.method, restOperation(op, opts));
   }
 
   // tRPC procedures each get their own path: /api/trpc/user.byId
   for (const op of ops.filter((o) => o.ep.rpc?.kind === "trpc")) {
-    const path = trimTrailingSlashes(op.ep.path) + "/" + op.ep.rpc!.procedure;
+    const path = trimTrailingSlashes(specPath(op.ep)) + "/" + op.ep.rpc!.procedure;
     const item = (paths[path] ??= {});
     putOperation(item, op.ep.method, trpcOperation(op));
   }
@@ -41,7 +41,7 @@ export function generateOpenApi(plan: Plan, opts: OpenApiOptions = {}): Record<s
   let rpcIndex = 0;
   for (const group of rpcGroups.values()) {
     const first = group[0]!.ep;
-    const item = (paths[first.path] ??= {});
+    const item = (paths[specPath(first)] ??= {});
     putOperation(item, first.method, jsonRpcOperation(group, rpcIndex++ === 0 ? "jsonRpc" : `jsonRpc${rpcIndex}`));
   }
 
@@ -54,7 +54,7 @@ export function generateOpenApi(plan: Plan, opts: OpenApiOptions = {}): Record<s
   let gqlIndex = 0;
   for (const group of gqlGroups.values()) {
     const first = group[0]!.ep;
-    const item = (paths[first.path] ??= {});
+    const item = (paths[specPath(first)] ??= {});
     putOperation(item, first.method, graphqlOperation(group, gqlIndex++ === 0 ? "graphql" : `graphql${gqlIndex}`));
   }
 
@@ -264,4 +264,15 @@ function putOperation(item: Record<string, unknown>, method: string, operation: 
   }
   const ext = (item["x-har2sdk-methods"] ??= {}) as Record<string, unknown>;
   setOwn(ext, method.toUpperCase(), operation);
+}
+
+/**
+ * The path as an OpenAPI path key. A literal segment that holds "/", "?", "#" or "%" once decoded
+ * (GitLab's `platform%2Fbackend`) is written encoded, as the client requests it: decoded, it would name
+ * another resource.
+ */
+function specPath(ep: { path: string; tokens: readonly ({ kind: "literal"; value: string } | { kind: "param"; name: string; suffix?: string })[] }): string {
+  if (!ep.tokens.some((t) => (t.kind === "literal" ? t.value : (t.suffix ?? "")).match(/[%/?#]/))) return ep.path;
+  const enc = (x: string) => x.replace(/[%/?#]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0"));
+  return "/" + ep.tokens.map((t) => (t.kind === "param" ? `{${t.name}}${enc(t.suffix ?? "")}` : enc(t.value))).join("/");
 }

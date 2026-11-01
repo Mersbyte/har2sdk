@@ -246,7 +246,10 @@ export function filterExchanges(exchanges: Exchange[], opts: FilterOptions = {})
     else if (reason) dropped[reason] = (dropped[reason] ?? 0) + 1;
     else kept.push(ex);
     // A WebSocket entry has a ws:// or wss:// URL: its frames are still evidence.
-    if (reason && reason !== "unknown-type" && reason !== "static-asset" && (reason !== "not-http" || ex.evidence?.length)) evidence.push(ex);
+    // Static assets are code and media, except a beacon or report the page sent (sendBeacon is
+    // `ping`, CSP reports `cspviolationreport`) or any other one with a request body: those carry data.
+    const sends = ex.resourceType === "ping" || ex.resourceType === "cspviolationreport" || !!ex.requestBody;
+    if (reason && reason !== "unknown-type" && (reason !== "static-asset" || sends) && (reason !== "not-http" || ex.evidence?.length)) evidence.push(ex);
     if (reason === "telemetry" && telemetry.size < 5) telemetry.add(label(ex));
   }
   // An untyped answer to a call the capture shows elsewhere (a 304 after a 200) is that call.

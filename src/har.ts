@@ -134,7 +134,9 @@ function truncated(entries: number): HarError {
 
 export function normaliseEntries(entries: HarEntry[]): Exchange[] {
   const out: Exchange[] = [];
-  entries.forEach((entry, index) => {
+  entries.forEach((raw, index) => {
+    const entry = cleanEntry(raw);
+    if (!entry) return;
     let url: URL;
     try {
       url = new URL(entry.request.url);
@@ -168,6 +170,41 @@ export function normaliseEntries(entries: HarEntry[]): Exchange[] {
     });
   });
   return out;
+}
+
+/**
+ * The entry with every field the parser reads coerced to the type HAR 1.2 gives it, so a malformed
+ * export (a number as `text`, an object as `headers`, null items) is read as far as it makes sense instead
+ * of crashing. Undefined when it isn't an entry at all.
+ */
+function cleanEntry(raw: unknown): HarEntry | undefined {
+  if (!isObject(raw) || !isObject(raw.request) || !isObject(raw.response)) return undefined;
+  const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+  const pairs = (v: unknown): HarNameValue[] =>
+    Array.isArray(v) ? v.filter((h): h is HarNameValue => isObject(h) && typeof h.name === "string").map((h) => ({ name: h.name, value: typeof h.value === "string" ? h.value : h.value == null ? "" : String(h.value) })) : [];
+  const req = raw.request;
+  const res = raw.response;
+  const url = str(req.url);
+  if (!url) return undefined;
+  const pd = isObject(req.postData) ? req.postData : undefined;
+  const content = isObject(res.content) ? res.content : undefined;
+  return {
+    ...(str(raw.startedDateTime) ? { startedDateTime: raw.startedDateTime as string } : {}),
+    request: {
+      method: str(req.method) ?? "GET",
+      url,
+      headers: pairs(req.headers),
+      queryString: pairs(req.queryString),
+      ...(pd ? { postData: { mimeType: str(pd.mimeType) ?? "", ...(str(pd.text) !== undefined ? { text: pd.text as string } : {}), ...(Array.isArray(pd.params) ? { params: pairs(pd.params) } : {}), ...(str(pd.encoding) ? { encoding: pd.encoding } : {}) } as HarPostData } : {}),
+    },
+    response: {
+      status: Number(res.status) || 0,
+      headers: pairs(res.headers),
+      ...(content ? { content: { mimeType: str(content.mimeType) ?? "", ...(str(content.text) !== undefined ? { text: content.text as string } : {}), ...(str(content.encoding) ? { encoding: content.encoding as string } : {}) } } : {}),
+    },
+    ...(str(raw._resourceType) ? { _resourceType: raw._resourceType as string } : {}),
+    ...(Array.isArray(raw._webSocketMessages) ? { _webSocketMessages: raw._webSocketMessages.filter(isObject) } : {}),
+  };
 }
 
 export function loadHar(text: string): Exchange[] {
@@ -367,9 +404,14 @@ function headerMap(headers: HarNameValue[] | undefined): Map<string, string> {
   return m;
 }
 
+/**
+ * JSON by its media type: application/json, +json suffixes, and the other "json" types APIs send
+ * (AWS's application/x-amz-json-1.1, application/x-json). Not JSON Lines or JSON text sequences, which
+ * are read line by line.
+ */
 export function isJsonMime(mime: string): boolean {
-  const m = mime.toLowerCase();
-  return /[/+]json\b/.test(m) || m.includes("application/graphql-response");
+  const m = String(mime ?? "").toLowerCase().split(";")[0]!;
+  return (m.includes("json") && !LINE_JSON_MIME.test(m)) || m.includes("application/graphql-response");
 }
 
 /**

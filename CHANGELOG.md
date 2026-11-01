@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.6.12
+
+Fixes from a seventeenth review: an independent read-only review by Claude Code of 0.6.11, before launch. Fourteen findings (eight leaks, two wrong outputs, one integrity, two quality, one slow input) and the claims they falsified. Each was reproduced here with the reviewer's input before it was fixed. Tests are in `test/review17.test.ts`, with generated variants; 61 of its 71 tests fail on 0.6.11. `test/fixtures/demo-snapshot.json` is unchanged.
+
+**Security**
+- WebSocket frames in Socket.IO (`42["event",{…}]`), SockJS (`a["…"]`), SignalR (`…\u001e`) and STOMP (`login:okilic` header lines) framing weren't read; only plain JSON frames were. They are now (L1).
+- Page JSON in common shapes wasn't read: `JSON.parse("{…}")`, Next.js flight data (`self.__next_f.push([1,"3:{…}"])`), JSON in an attribute (`data-props="{&quot;…"`), and `<meta name="user-login" content="…">` / `<input name="username" value="…">`. String literals in scripts that hold JSON, attribute JSON and name–value pairs are read now; other script strings are still not evidence (L2).
+- Identity keys were English only: `kullaniciAdi`, `benutzername`, `usuario`, `pseudo`, `auteur`… weren't. Identity keys now cover Turkish, German, Spanish and French, the languages of the personal-key pools (L3).
+- JSON inside a form or multipart field (Slack's `payload`, a GraphQL upload's `operations`) wasn't parsed, and a GraphQL variable wasn't read under the argument it feeds (`up(owner: $o)` with `{"o":"okilic"}`). Both are now (L4).
+- Cookie values were read as sent: `ajs_user_id=%22okilic%22` (Segment) and an encoded email in a cookie weren't recognised. Cookies are now also read decoded once and unquoted, under their own names (L5).
+- `sendBeacon` requests (`_resourceType: "ping"`) and CSP reports were dropped as static assets and never read. A beacon, a report or any asset request with a body is evidence now (L6).
+- JSON under media types without `/json` or `+json` (AWS's `application/x-amz-json-1.1`, `application/x-json`) was binary. Any media type with "json" in it is JSON now, except JSON Lines and JSON text sequences (L7).
+- The default mock served dictionary keys that held a recorded identity or email as a part (`user:mdemir`, `oguz.kilic@corp.example:prefs`, `mdemir/dotfiles`) as recorded. Those parts are faked now; the rest of the key stays (L8).
+
+**Correctness**
+- Normal apps were refused (exit 2) over ordinary words: `?from=search`, `?ref=search`, `?sort_by=orders`, React Router's `{"to":"/orders"}` in a page, `{"from":"search","to":"cart"}` in analytics, and GitLab's `?ref=main` next to a file `main.ts`. Now a plain word under `from`, `to` or `by` is a weak identity, dropped when the capture uses it as an endpoint; a plain word under `ref` or `number` is vocabulary; `sort_by` / `orderBy` aren't person keys; and a value with a "/" in it is never an identity. `{"from":"mdemir"}` next to `/users/mdemir/inbox`, `created_by`, and `ref: "ORD-77314"` still count (R1).
+- One field like `thumb_200` among ordinary property names made the whole object a `Record<string, …>`, and the mock renamed every key. A key that only mixes letters and digits makes a dictionary now only when such keys are most of the object's keys, its only key, or recorded elsewhere (R2).
+- An encoded slash in a path (`/projects/platform%2Fbackend`) was decoded in the OpenAPI path key, naming another resource. The spec now writes it as the client requests it (I1).
+- The CLI overwrote a `client.ts` or `openapi.json` it hadn't written; the MCP server already refused. The CLI now refuses too, with exit 1 (Q1).
+- A malformed HAR field (a number as `text`, an object as `headers`, `null` items) crashed with a raw `TypeError`. Entries are read as far as they make sense now (Q2).
+
+**Slow inputs**
+- The output scan searched the whole text once per recorded value that was one of its tokens: 8,000 GraphQL operations with data-like field names took 8.7 s (the reviewer's measurement). A value that is a token is in the text without a search: 3.8 s here, linear (D1).
+
+**Behaviour changes**
+- More of a capture is evidence (frames, page strings and attributes, cookies decoded, beacons, form JSON, GraphQL variables by argument, json media types, identity keys in five languages): a path segment may become a parameter, or the CLI may refuse, where it didn't.
+- Fewer refusals over words under `from`, `to`, `by`, `ref`, `number` and `sort_by`.
+- A record with one digit-bearing field is an interface, not a `Record`, in `client.ts`, `openapi.json` and the mock.
+- `har2sdk` exits 1 instead of overwriting a `client.ts` / `openapi.json` it didn't write.
+
+**Docs**
+- SECURITY.md lists the new carriers, the weak keys and the dictionary rule; README mentions identity keys in five languages and the dictionary rule. The claims the review falsified (WebSocket frames, page JSON, static assets, five languages, dictionaries) match the code now (C1).
+- Not fixed: JSONP responses and base64 JSON in analytics parameters are not read (known limits: script code, and JWT-like encodings).
+
 ## 0.6.11
 
 Fixes from a sixteenth review: a read-only review by Codex of the 0.6.10 changes only (`09d1927..ea7bcd6`), six findings. Each was reproduced here with the reviewer's input before it was fixed. Tests are in `test/review16.test.ts`, with generated variants; 20 of its 24 tests fail on 0.6.10. `test/fixtures/demo-snapshot.json` is unchanged.

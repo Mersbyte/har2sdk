@@ -117,7 +117,7 @@ function bump(rec: Partial<Record<StringFormat, number>>, f: StringFormat): void
   rec[f] = (rec[f] ?? 0) + 1;
 }
 
-export { isDataKey } from "./redact.js";
+export { dataKeysOf, isDataKey } from "./redact.js";
 
 function looksLikeIdKeyedMap(keys: string[]): boolean {
   if (!keys.length) return false;
