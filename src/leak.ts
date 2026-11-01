@@ -23,7 +23,7 @@ import type { Exchange } from "./har.js";
 import { isObject, NOT_JSON, parseJson } from "./har.js";
 import { graphqlLiteralMatches, quotedStrings, replacePercentRuns, trimDotsDashesTildes } from "./linear.js";
 import { dataKeysOf, isContactName, isDataKey, isEmail, isOrderingKey, isPersonalName, isPersonalNameWord, isSecretValue, isSensitiveName, Scrubber } from "./redact.js";
-import { isPlural, singular, words } from "./words.js";
+import { singular, words } from "./words.js";
 
 export interface Taint {
   /** Lower-cased recorded values that look like data. */
@@ -74,7 +74,7 @@ const IDENTITY_WORDS = new Set(
     "kullanici kullanıcı kullaniciadi kullanıcıadı sahip sahibi yazar gonderen gönderen alici alıcı uye üye hesap " +
     "benutzer benutzername nutzer nutzername anmeldename besitzer eigentuemer eigentümer verfasser absender empfaenger empfänger mitglied konto " +
     "usuario usuarios autor propietario dueno dueño remitente destinatario miembro cuenta apodo " +
-    "utilisateur pseudo identifiant auteur proprietaire propriétaire expediteur expéditeur destinataire membre compte"
+    "utilisateur pseudo auteur proprietaire propriétaire expediteur expéditeur destinataire membre compte"
   ).split(" "),
 );
 
@@ -128,10 +128,11 @@ function weakIdentityKey(key: string | undefined): boolean {
   return w.length === 1 && WEAK_IDENTITY_KEYS.has(w[0]!);
 }
 
+/** A key that is only `ref`, `number`, `no`…: not `reservationRef` or `orderNumber`, which name a record. */
 function weakIdKey(key: string | undefined): boolean {
   if (!key) return false;
   const w = words(key);
-  return WEAK_ID_WORDS.has(w[w.length - 1] ?? "");
+  return w.length === 1 && WEAK_ID_WORDS.has(w[0]!);
 }
 
 /**
@@ -343,21 +344,16 @@ export class TaintCollector {
     // A route ("/orders", "src/main.ts") is never a name, and a plain word under `ref` or `number` is the
     // app's vocabulary (`ref=main`, `?ref=search`).
     if (usable && (isIdentityKey(key) || keyKind(key) === 2) && !/\s/.test(v) && /\p{L}/u.test(v) && !/^\d{4}-\d{2}/.test(v) && !(!isIdentityKey(key) && /^[A-Z]{2,4}$/.test(v)) && !v.includes("/")) {
-      if (!(!isIdentityKey(key) && weakIdKey(key) && !/\p{Nd}/u.test(v) && !isDataLike(v))) {
-        const had = this.taint.identities.has(lower);
-        this.identity(lower);
-        // `from`, `to`, `by`: kept only while the capture doesn't use the word as one of its endpoints.
-        if (!had && weakIdentityKey(key)) this.weakOnly.add(lower);
-      }
+      // `from`, `to`, `by` are weak evidence: kept only while the capture doesn't use the word as one of its
+      // top-level endpoints, however often it is seen that way.
+      if (!(!isIdentityKey(key) && weakIdKey(key) && !/\p{Nd}/u.test(v) && !isDataLike(v))) this.identity(lower, weakIdentityKey(key));
     }
     // An email's local part is often reused as a username elsewhere in the same app
     // ("okilic@corp.example" → "/people/okilic/…"), whatever key the email sat under.
     if (isEmail(v)) {
       const local = lower.slice(0, lower.indexOf("@")).replace(/\+.*$/, "");
       if (local.length >= 3 && !COMMON.has(local) && !ROLE_MAILBOX.has(local) && /[a-z]/.test(local)) {
-        const had = this.taint.identities.has(local);
-        this.identity(local);
-        if (!had) this.weakOnly.add(local);
+        this.identity(local, true);
       }
     }
     // A bare string in a people collection's response (GET /api/users → ["ece.kaya", "zkaya"]) names a person.
@@ -445,9 +441,15 @@ export class TaintCollector {
    * `from`, `to` or `by` ({"from":"search"}). See the end of collectTaint.
    */
   readonly weakOnly = new Set<string>();
+  /** Identities seen at least once from strong evidence: weak evidence never demotes them. */
+  private readonly strong = new Set<string>();
 
-  private identity(lower: string): void {
-    this.weakOnly.delete(lower);
+  /** @param weak the evidence is weak (see weakOnly); repeating it keeps it weak, strong evidence wins. */
+  private identity(lower: string, weak = false): void {
+    if (!weak) {
+      this.strong.add(lower);
+      this.weakOnly.delete(lower);
+    } else if (!this.strong.has(lower)) this.weakOnly.add(lower);
     if (this.taint.identities.has(lower)) return;
     this.taint.identities.add(lower);
     const form = aliasOf(lower);
@@ -485,7 +487,7 @@ export class TaintCollector {
     else if (isObject(value)) {
       const here = person || personObject(value);
       this.joinedNames(value);
-      const dataKeys = new Set(dataKeysOf(Object.keys(value)));
+      const dataKeys = new Set(dataKeysOf(Object.keys(value), (k) => typeof (value as Record<string, unknown>)[k] === "object" && (value as Record<string, unknown>)[k] !== null));
       for (const [k, v] of Object.entries(value)) {
         if (skip?.(k, depth, value)) continue;
         if (dataKeys.has(k)) this.add(k, "key");
@@ -579,6 +581,13 @@ export function collectTaint(exchanges: Exchange[], evidence: Exchange[] = []): 
     }
   }
   for (const ex of [...exchanges, ...evidence]) {
+    // GraphQL over GET: the variables under the arguments they feed, as for a POST body.
+    const getQuery = ex.query.find(([k]) => k === "query")?.[1];
+    const getVars = ex.query.find(([k]) => k === "variables")?.[1];
+    if (getQuery && getVars && isGraphqlDocument(getQuery)) {
+      const vars = parseJson(getVars.slice(0, 2_000_000));
+      if (isObject(vars)) graphqlVariableArgs({ query: getQuery, variables: vars }, c);
+    }
     for (const [k, v] of ex.query) {
       // GraphQL over GET: the document is code, its inline literals are data.
       if (k === "query") graphqlLiterals(v, c);
@@ -717,16 +726,17 @@ export function collectTaint(exchanges: Exchange[], evidence: Exchange[] = []): 
     }
   }
   // An identity known only from weak evidence (a mailbox cart@supplier.example, {"from":"search"}, `to=orders`)
-  // that the capture uses as one of its own endpoints (GET /api/v1/cart) is that endpoint's word, not the user's
-  // name: the last segment of a generated path, and not as a member of a collection (/people/okilic) or after a
-  // person word (/user/okilic).
+  // that the capture uses as one of its own top-level endpoints (GET /api/v1/cart, GET /search) is that
+  // endpoint's word, not the user's name. Only a top-level endpoint establishes that: the word right after the
+  // API root or version, ending the path. A word under another one (/inbox/parker, /people/okilic) is a member,
+  // and stays an identity.
   if (c.weakOnly.size) {
     for (const ex of exchanges) {
       const segs = ex.pathname.toLowerCase().split("/").filter(Boolean);
       const last = segs[segs.length - 1];
       const prev = segs[segs.length - 2];
       if (!last || !c.weakOnly.has(last) || !/^\p{L}+$/u.test(last)) continue;
-      if (prev && (isPlural(prev) || personWord(prev))) continue;
+      if (prev !== undefined && !/^(api|rest|graphql|v\d+(?:\.\d+)*|\d+(?:\.\d+)?)$/.test(prev)) continue;
       c.taint.identities.delete(last);
       c.weakOnly.delete(last);
     }
@@ -761,6 +771,13 @@ function addCookie(c: TaintCollector, rawName: string, rawValue: string): void {
     }
   }
   v = v.replace(/^"(.*)"$/s, "$1");
+  // Express (cookie-parser): `j:` before a JSON value, `s:` before a signed value ("s:okilic.<signature>").
+  if (/^j:[[{]/.test(v)) v = v.slice(2);
+  else if (/^s:./.test(v)) {
+    const signed = v.slice(2);
+    const dot = signed.lastIndexOf(".");
+    v = dot > 0 ? signed.slice(0, dot) : signed;
+  }
   if (v !== raw) c.add(v, "cookie");
   if (name) {
     c.add(v, name);
@@ -866,20 +883,54 @@ function stringLiterals(script: string): string[] {
       if (t[j] === "\\") j++;
       else if (t[j] === "{" || t[j] === "[") interesting = true;
     }
-    if (interesting && t[j] === q) {
-      const body = t.slice(i + 1, j);
-      // JS escapes as JSON escapes; \' and \xNN are JS-only.
-      const json = '"' + body.replace(/\\'/g, "'").replace(/\\x([0-9A-Fa-f]{2})/g, "\\u00$1").replace(/(^|[^\\])"/g, '$1\\"') + '"';
-      const v = parseJson(json);
-      if (typeof v === "string") out.push(v);
-    }
+    if (interesting && t[j] === q) out.push(unescapeJs(t.slice(i + 1, j)));
     i = j;
   }
   return out;
 }
 
+/** A JavaScript string literal's body, unescaped in one forward pass (\n, \', \", \xNN, \uNNNN, \u{…}). */
+function unescapeJs(body: string): string {
+  let out = "";
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i]!;
+    if (ch !== "\\" || i + 1 >= body.length) {
+      out += ch;
+      continue;
+    }
+    const n = body[++i]!;
+    if (n === "n") out += "\n";
+    else if (n === "t") out += "\t";
+    else if (n === "r") out += "\r";
+    else if (n === "b") out += "\b";
+    else if (n === "f") out += "\f";
+    else if (n === "v") out += "\v";
+    else if (n === "0" && !/[0-9]/.test(body[i + 1] ?? "")) out += "\0";
+    else if (n === "x" && /^[0-9A-Fa-f]{2}$/.test(body.slice(i + 1, i + 3))) {
+      out += String.fromCharCode(parseInt(body.slice(i + 1, i + 3), 16));
+      i += 2;
+    } else if (n === "u" && body[i + 1] === "{") {
+      const end = body.indexOf("}", i + 2);
+      const cp = end > 0 ? parseInt(body.slice(i + 2, end), 16) : NaN;
+      if (Number.isFinite(cp) && cp <= 0x10ffff) {
+        out += String.fromCodePoint(cp);
+        i = end;
+      } else out += n;
+    } else if (n === "u" && /^[0-9A-Fa-f]{4}$/.test(body.slice(i + 1, i + 5))) {
+      out += String.fromCharCode(parseInt(body.slice(i + 1, i + 5), 16));
+      i += 4;
+    } else if (n === "\r" || n === "\n") {
+      // A line continuation.
+      if (n === "\r" && body[i + 1] === "\n") i++;
+    } else out += n; // \\ \' \" and any other escaped character
+  }
+  return out;
+}
+
 const NAMED_VALUE_TAG = /<(?:meta|input|param|data|option|button|textarea|output|select)\b[^>]*>/gi;
-const TAG_ATTRIBUTE = /([\w:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g;
+// Anchored at the start of a name (nothing of its own kind before it): a long name without "=" is tried once,
+// not again from each of its characters.
+const TAG_ATTRIBUTE = /(?<![\w:.-])([\w:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g;
 
 /** `<meta name="user-login" content="okilic">`, `<input name="username" value="okilic">`: [name, value] pairs. */
 function namedValues(markup: string): [string, string][] {
@@ -1121,7 +1172,7 @@ function graphqlVariableArgs(body: unknown, c: TaintCollector): void {
   for (const op of (Array.isArray(body) ? body : [body]).slice(0, 200)) {
     if (!isObject(op) || typeof op.query !== "string" || !isObject(op.variables)) continue;
     const vars = op.variables as Record<string, unknown>;
-    for (const m of op.query.slice(0, 200_000).matchAll(/([A-Za-z_]\w{0,63})\s*:\s*\$([A-Za-z_]\w{0,63})/g)) {
+    for (const m of graphqlCode(op.query.slice(0, 200_000)).matchAll(/([A-Za-z_]\w{0,63})\s*:\s*\$([A-Za-z_]\w{0,63})/g)) {
       const arg = m[1]!;
       const value = Object.prototype.hasOwnProperty.call(vars, m[2]!) ? vars[m[2]!] : undefined;
       for (const x of Array.isArray(value) ? value.slice(0, 200) : [value]) {
@@ -1131,6 +1182,37 @@ function graphqlVariableArgs(body: unknown, c: TaintCollector): void {
       }
     }
   }
+}
+
+/** A GraphQL document with its comments and string contents blanked out: what is left is syntax. One pass. */
+function graphqlCode(doc: string): string {
+  let out = "";
+  let i = 0;
+  while (i < doc.length) {
+    const ch = doc[i]!;
+    if (ch === "#") {
+      const nl = doc.indexOf("\n", i);
+      i = nl < 0 ? doc.length : nl;
+      out += " ";
+    } else if (ch === '"') {
+      let j: number;
+      if (doc.startsWith('"""', i)) {
+        j = i + 3;
+        while (j < doc.length && !doc.startsWith('"""', j)) j += doc[j] === "\\" && doc.startsWith('"""', j + 1) ? 4 : 1;
+        j = Math.min(doc.length, j + 3);
+      } else {
+        j = i + 1;
+        while (j < doc.length && doc[j] !== '"' && doc[j] !== "\n") j += doc[j] === "\\" ? 2 : 1;
+        j = Math.min(doc.length, j + 1);
+      }
+      out += '""';
+      i = j;
+    } else {
+      out += ch;
+      i++;
+    }
+  }
+  return out;
 }
 
 /** A GraphQL argument that names a thing by id (`id`, `userId`, `orderNumber`). */
