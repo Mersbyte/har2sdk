@@ -108,6 +108,8 @@ export interface Endpoint {
   /** Indices of the exchanges that make up this endpoint. */
   samples: number[];
   example?: EndpointExample;
+  /** The recorded URLs end in "/" (Django, DRF): `path` and the client keep it, since such servers redirect or 404 without it. */
+  trailingSlash?: true;
 }
 
 export interface EndpointExample {
@@ -812,6 +814,8 @@ interface Accumulator {
   samples: number[];
   example?: EndpointExample;
   droppedQueryNames: number;
+  /** Samples whose recorded path ends in "/". */
+  slashes: number;
 }
 
 function newAccumulator(id: string, ex: Exchange, tokens: Token[], path: string, unit: Unit): Accumulator {
@@ -828,6 +832,7 @@ function newAccumulator(id: string, ex: Exchange, tokens: Token[], path: string,
     query: new Map(),
     bodies: new Map(),
     responses: new Map(),
+    slashes: 0,
     gql: gql
       ? {
           operationName: gql.operationName,
@@ -854,6 +859,8 @@ const IGNORED_QUERY = new Set(["_", "_t", "cachebuster", "cb", "nocache"]);
 function addSample(a: Accumulator, ex: Exchange, pathValues: Record<string, string>, unit: Unit): void {
   a.count++;
   a.samples.push(ex.index);
+  // tRPC's last segment is the procedure, not part of the endpoint's path.
+  if (unit.rpc?.kind !== "trpc" && a.tokens.length && ex.pathname.endsWith("/")) a.slashes++;
 
   for (const [name, value] of Object.entries(pathValues)) {
     let p = a.pathParams.get(name);
@@ -978,20 +985,35 @@ function observeFields(shape: Shape, fields: [string, string][]): void {
   shape.count++;
   const o = (shape.object ??= { count: 0, props: new Map() });
   o.count++;
+  // A key sent more than once (`tag=a&tag=b`), or PHP's `tag[]`, is a list: the client sends one field per item.
+  const byKey = new Map<string, string[]>();
   for (const [k, v] of fields) {
+    const vs = byKey.get(k);
+    if (vs) vs.push(v);
+    else byKey.set(k, [v]);
+  }
+  for (const [k, vs] of byKey) {
     let child = o.props.get(k);
     if (!child) o.props.set(k, (child = emptyShape()));
-    observeText(child, v, { sensitive: isSensitiveName(k) });
+    const opts = { sensitive: isSensitiveName(k) };
+    if (vs.length > 1 || k.endsWith("[]")) {
+      child.count++;
+      const arr = (child.array ??= { count: 0, items: emptyShape() });
+      arr.count++;
+      for (const v of vs) observeText(arr.items, v, opts);
+    } else observeText(child, vs[0]!, opts);
   }
 }
 
 function finish(a: Accumulator): Endpoint {
   const bodies = [...a.bodies.values()].sort((x, y) => y.count - x.count);
+  const trailingSlash = a.slashes * 2 > a.count;
   return {
     id: a.id,
     method: a.method,
     origin: a.origin,
-    path: a.path,
+    path: a.path + (trailingSlash ? "/" : ""),
+    ...(trailingSlash ? { trailingSlash: true as const } : {}),
     tokens: a.tokens,
     name: "",
     tag: "",

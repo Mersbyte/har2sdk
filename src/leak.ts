@@ -356,6 +356,16 @@ export class TaintCollector {
         this.identity(local, true);
       }
     }
+    // An email inside a sentence ("Could not deliver to mehmet.yilmaz@corp.example, mailbox full") is as much
+    // evidence as one on its own: each is taken as if recorded alone. Splitting on separators keeps this linear.
+    // `mailto:ece@corp.example` passes as one email whose local part is "mailto:ece": it is split too.
+    if (v.includes("@")) {
+      let n = 0;
+      for (const piece of v.split(/[\s,;:()<>[\]{}"'`|=]+/)) {
+        const e = piece.replace(/^[.!?*_~-]+|[.!?*_~-]+$/g, "");
+        if (e !== v && e.includes("@") && isEmail(e) && ++n <= 32) this.add(e, undefined, person);
+      }
+    }
     // A bare string in a people collection's response (GET /api/users → ["ece.kaya", "zkaya"]) names a person.
     if (bare && usable && !/\s/.test(v) && v.length <= 64) {
       this.identity(lower);

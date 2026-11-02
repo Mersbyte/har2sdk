@@ -120,7 +120,7 @@ export function applyAnnotations(model: ApiModel, ann: Annotations | undefined):
           pp.name = to;
           pp.wireName = to;
           for (const t of ep.tokens) if (t.kind === "param" && t.name === from) t.name = to;
-          ep.path = "/" + ep.tokens.map(tokenText).join("/");
+          ep.path = "/" + ep.tokens.map(tokenText).join("/") + (ep.trailingSlash ? "/" : "");
         } else if (qp) {
           qp.name = to; // wireName stays: that's what the server expects
         } else warnings.push(`No parameter "${from}" on "${id}".`);

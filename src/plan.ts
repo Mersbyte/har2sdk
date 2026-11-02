@@ -28,7 +28,14 @@ export interface PlannedOp {
   pathParams: PlannedParam[];
   queryParams: PlannedParam[];
   paramsTypeName?: string;
-  body?: { kind: "json" | "form" | "multipart" | "text"; mimeType: string; type: TypeNode; typeName?: string };
+  body?: {
+    kind: "json" | "form" | "multipart" | "text";
+    mimeType: string;
+    /** A JSON body's media type when the app didn't send plain `application/json` ("application/vnd.api+json"). */
+    contentType?: string;
+    type: TypeNode;
+    typeName?: string;
+  };
   response: {
     type: TypeNode;
     typeName: string;
@@ -171,6 +178,8 @@ function planOp(ep: Endpoint, model: ApiModel, registry: TypeRegistry, warnings:
     else if (rb.kind === "text") type = { k: "string" };
     else type = registry.fromShape(rb.shape, [hint, (resource ?? P) + "Input"], resource);
     body = { kind: rb.kind, mimeType: rb.mimeType, type, typeName: hint };
+    const ct = rb.kind === "json" && !ep.graphql && !ep.rpc ? jsonMediaType(rb.mimeType) : undefined;
+    if (ct) body.contentType = ct;
   }
 
   // Success response: merge every 2xx we saw — unless different statuses
@@ -322,3 +331,13 @@ export function checkBaseUrl(url: string): void {
 
 /** Names every object has (from Object.prototype): not usable as optional parameter names. */
 const OBJECT_MEMBERS = new Set(Object.getOwnPropertyNames(Object.prototype));
+
+/**
+ * The structured-syntax JSON media type a request body was sent with ("application/vnd.api+json",
+ * "application/merge-patch+json"), if it isn't plain JSON: servers of such APIs answer 415 to `application/json`.
+ * Only a media type made of the characters RFC 6838 allows, without parameters, is kept.
+ */
+export function jsonMediaType(mime: string): string | undefined {
+  const m = mime.split(";")[0]!.trim().toLowerCase();
+  return /^application\/[a-z0-9][a-z0-9!#$&^_.-]{0,100}\+json$/.test(m) ? m : undefined;
+}

@@ -206,7 +206,7 @@ export function templatePaths(samples: PathSample[], opts: TemplateOptions = {})
       // segment must be id-shaped, or name a user/tenant right after a collection.
       // A one-word name counts as a user's name after a collection of people (/users/oguz).
       const named = isIdentity(opts.taint, seg) || (!!prevSeg && personWord(prevSeg) && !!opts.taint?.labels.has(lower));
-      if (opts.taint && isTainted(opts.taint, seg) && (isIdShaped(seg) || (prevSeg && isPlural(prevSeg) && named && !COMMON_SUBPATHS.has(lower)))) return null;
+      if (opts.taint && isTainted(opts.taint, seg) && (isIdShaped(seg) || (prevSeg && (isPlural(prevSeg) || personWord(prevSeg)) && named && !COMMON_SUBPATHS.has(lower)))) return null;
       // Strong tenant prefixes (/orgs/acme/repos, /t/acme-corp/projects): the
       // next segment names a tenant, unless it's a sub-collection or a keyword.
       // Weaker words (account, team, site…) need evidence: see shouldMerge.

@@ -171,10 +171,12 @@ describe("F3 parallel generate_sdk calls on one folder don't lose annotations or
 
 // ── F4 ─────────────────────────────────────────────────────────────────────────
 
-describe("F4 package.json publishes publicly, with provenance", () => {
+// Review 19 (H9): releases are published from a laptop, not CI, so no attestation exists; package.json no
+// longer claims provenance.
+describe("F4 package.json publishes publicly", () => {
   it("publishConfig", () => {
     const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
-    expect(pkg.publishConfig).toEqual({ access: "public", provenance: true });
+    expect(pkg.publishConfig).toEqual({ access: "public" });
   });
 });
 
