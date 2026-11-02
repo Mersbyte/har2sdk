@@ -117,7 +117,7 @@ function restOperation(op: PlannedOp, opts: OpenApiOptions): Record<string, unkn
   if (op.foreignOrigin) operation.servers = [{ url: op.foreignOrigin }];
 
   if (op.body) {
-    const mime = op.body.kind === "json" ? "application/json" : op.body.mimeType.split(";")[0] || "application/octet-stream";
+    const mime = op.body.kind === "json" ? (op.body.contentType ?? "application/json") : op.body.mimeType.split(";")[0] || "application/octet-stream";
     const schema = op.body.kind === "multipart" ? { type: "object" } : toJsonSchema(op.body.type);
     const content: Record<string, unknown> = { schema };
     if (opts.examples && ep.example?.requestBody !== undefined) content.example = ep.example.requestBody;
@@ -271,8 +271,8 @@ function putOperation(item: Record<string, unknown>, method: string, operation: 
  * (GitLab's `platform%2Fbackend`) is written encoded, as the client requests it: decoded, it would name
  * another resource.
  */
-function specPath(ep: { path: string; tokens: readonly ({ kind: "literal"; value: string } | { kind: "param"; name: string; suffix?: string })[] }): string {
+function specPath(ep: { path: string; trailingSlash?: true; tokens: readonly ({ kind: "literal"; value: string } | { kind: "param"; name: string; suffix?: string })[] }): string {
   if (!ep.tokens.some((t) => (t.kind === "literal" ? t.value : (t.suffix ?? "")).match(/[%/?#]/))) return ep.path;
   const enc = (x: string) => x.replace(/[%/?#]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0"));
-  return "/" + ep.tokens.map((t) => (t.kind === "param" ? `{${t.name}}${enc(t.suffix ?? "")}` : enc(t.value))).join("/");
+  return "/" + ep.tokens.map((t) => (t.kind === "param" ? `{${t.name}}${enc(t.suffix ?? "")}` : enc(t.value))).join("/") + (ep.trailingSlash ? "/" : "");
 }

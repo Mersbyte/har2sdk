@@ -6,7 +6,7 @@ import type { Plan, PlannedOp, PlannedParam } from "./plan.js";
 import { printTs, printTsInterface, type TypeNode } from "./types.js";
 import { propertyKey } from "./words.js";
 
-export const VERSION = "0.6.14";
+export const VERSION = "0.6.15";
 
 export function generateTypeScript(plan: Plan): string {
   const { model, clientName, ops } = plan;
@@ -68,7 +68,18 @@ export function generateTypeScript(plan: Plan): string {
   if (ops.some((o) => o.ep.graphql)) {
     opt.push(`  /** Throw \`GraphQLError\` whenever a response carries \`errors\`, even alongside partial \`data\`. */`, `  strictGraphQL?: boolean | undefined;`);
   }
-  if (ops.some((o) => o.foreignOrigin)) opt.push(`  /** Override secondary origins seen in the capture: { [recordedOrigin]: newOrigin }. */`, `  origins?: Record<string, string> | undefined;`);
+  if (ops.some((o) => o.foreignOrigin)) {
+    opt.push(
+      `  /** Override secondary origins seen in the capture: { [recordedOrigin]: newOrigin }. */`,
+      `  origins?: Record<string, string> | undefined;`,
+      `  /**`,
+      `   * Origins besides \`baseUrl\` that may receive your credentials (token, API key, cookie), \`headers\` and the`,
+      `   * recorded default headers. By default only \`baseUrl\`'s origin gets them: a secondary origin in the capture`,
+      `   * can be a third party. Per-call \`options.headers\` are always sent.`,
+      `   */`,
+      `  trustedOrigins?: readonly string[] | undefined;`,
+    );
+  }
   opt.push(`}`, ``);
   out.push(...opt);
 
@@ -88,7 +99,7 @@ export function generateTypeScript(plan: Plan): string {
 
   for (const op of ops) out.push(...opMethod(op, plan), ``);
 
-  out.push(...requestMethod(plan));
+  out.push(...requestMethod(plan, ops));
   if (ops.some((o) => o.ep.graphql)) out.push(``, ...graphqlMethod());
   if (ops.some((o) => o.ep.rpc?.kind === "jsonrpc")) out.push(``, ...jsonRpcMethod());
   if (ops.some((o) => o.ep.rpc?.kind === "trpc")) out.push(``, ...trpcMethod());
@@ -268,6 +279,7 @@ function opMethod(op: PlannedOp, plan: Plan): string[] {
     if (op.body) {
       init.push(`body`);
       if (op.body.kind !== "json") init.push(`bodyType: ${JSON.stringify(op.body.kind)}`);
+      if (op.body.contentType) init.push(`contentType: ${JSON.stringify(op.body.contentType)}`);
     }
     if (op.response.kind !== "json") init.push(`responseType: ${JSON.stringify(op.response.kind)}`);
     if (origin) init.push(`origin: ${origin}`);
@@ -306,13 +318,14 @@ function encodeLiteral(seg: string): string {
 function pathExpr(op: PlannedOp): string {
   const { ep } = op;
   if (!ep.tokens.length) return JSON.stringify("/");
+  const end = ep.trailingSlash ? "/" : "";
   const hasParam = ep.tokens.some((t) => t.kind === "param");
-  if (!hasParam) return JSON.stringify("/" + ep.tokens.map((t) => encodeLiteral(t.kind === "param" ? "" : t.value)).join("/"));
+  if (!hasParam) return JSON.stringify("/" + ep.tokens.map((t) => encodeLiteral(t.kind === "param" ? "" : t.value)).join("/") + end);
   // Escape for a template literal only when one is emitted: a backslash before "$" in a JSON string is a real backslash
   // ("/odata/$metadata" would request "/odata//$metadata").
   const tpl = (x: string) => x.replace(/[`\\$]/g, "\\$&");
   const parts = ep.tokens.map((t) => (t.kind === "param" ? `\${enc(params${access(t.name)})}` + tpl(encodeLiteral(t.suffix ?? "")) : tpl(encodeLiteral(t.value))));
-  return "`/" + parts.join("/") + "`";
+  return "`/" + parts.join("/") + end + "`";
 }
 
 const RUNTIME_TYPES = `export interface RequestOptions {
@@ -331,7 +344,8 @@ export class ApiError<E = unknown> extends Error {
   readonly operation: string | undefined;
 
   constructor(method: string, url: string, status: number, body: E, operation?: string) {
-    super(\`\${method} \${url} failed with HTTP \${status}\`);
+    // The message leaves out the query string: it can hold an API key or user data, and messages end up in logs.
+    super(\`\${method} \${url.replace(/[?#].*$/s, "")} failed with HTTP \${status}\`);
     this.name = "ApiError";
     this.method = method;
     this.url = url;
@@ -358,8 +372,9 @@ function enc(value: string | number | boolean): string {
   return encodeURIComponent(String(value));
 }`;
 
-function requestMethod(plan: Plan): string[] {
+function requestMethod(plan: Plan, ops: readonly PlannedOp[]): string[] {
   const a = plan.model.auth;
+  const multiOrigin = ops.some((o) => o.foreignOrigin);
   const authLines: string[] = [];
   const hasToken = a.bearer || (!a.basic && !a.apiKeyHeaders.length && !a.apiKeyQuery.length && !a.cookieNames.length);
   if (hasToken) {
@@ -383,6 +398,7 @@ function requestMethod(plan: Plan): string[] {
     `      query?: Record<string, QueryValue> | undefined;`,
     `      body?: unknown;`,
     `      bodyType?: "json" | "form" | "multipart" | "text" | undefined;`,
+    `      contentType?: string | undefined;`,
     `      responseType?: "json" | "text" | "empty" | "binary" | undefined;`,
     `      origin?: string | undefined;`,
     `      options?: RequestOptions | undefined;`,
@@ -395,15 +411,30 @@ function requestMethod(plan: Plan): string[] {
     `      if (Array.isArray(value)) for (const item of value) url.searchParams.append(key, String(item));`,
     `      else url.searchParams.set(key, String(value));`,
     `    }`,
-    `    const extra = typeof this.options.headers === "function" ? await this.options.headers() : this.options.headers;`,
-    `    const headers: Record<string, string> = { accept: "application/json, */*", ...DEFAULT_HEADERS, ...extra };`,
-    ...authLines,
+    ...(multiOrigin
+      ? [
+          `    // Credentials and app-wide headers go to baseUrl's origin (and trustedOrigins) only, never to a third party.`,
+          `    const own = [this.baseUrl, ...(this.options.trustedOrigins ?? [])].some((o) => new URL(o).origin === url.origin);`,
+          `    const headers: Record<string, string> = { accept: "application/json, */*" };`,
+          `    if (own) {`,
+          `      const extra = typeof this.options.headers === "function" ? await this.options.headers() : this.options.headers;`,
+          `      Object.assign(headers, DEFAULT_HEADERS, extra);`,
+          ...authLines.map((l) => "  " + l),
+          `    }`,
+        ]
+      : [
+          `    const extra = typeof this.options.headers === "function" ? await this.options.headers() : this.options.headers;`,
+          `    const headers: Record<string, string> = { accept: "application/json, */*", ...DEFAULT_HEADERS, ...extra };`,
+          ...authLines,
+        ]),
     `    let body: string | URLSearchParams | FormData | undefined;`,
     `    if (init.body !== undefined) {`,
     `      if (init.bodyType === "form") {`,
     `        const form = new URLSearchParams();`,
     `        for (const [key, value] of Object.entries(init.body as Record<string, unknown>)) {`,
-    `          if (value !== undefined && value !== null) form.append(key, String(value));`,
+    `          if (value === undefined || value === null) continue;`,
+    `          if (Array.isArray(value)) for (const item of value) form.append(key, String(item));`,
+    `          else form.append(key, String(value));`,
     `        }`,
     `        body = form;`,
     `      } else if (init.bodyType === "multipart") {`,
@@ -412,7 +443,7 @@ function requestMethod(plan: Plan): string[] {
     `        body = String(init.body);`,
     `      } else {`,
     `        body = JSON.stringify(init.body);`,
-    `        headers["content-type"] = "application/json";`,
+    `        headers["content-type"] = init.contentType ?? "application/json";`,
     `      }`,
     `    }`,
     `    Object.assign(headers, init.options?.headers);`,
@@ -436,7 +467,15 @@ function requestMethod(plan: Plan): string[] {
     `        }`,
     `      }`,
     `    }`,
-    `    if (!res.ok) throw new ApiError(method, url.toString(), res.status, data, init.operation);`,
+    ...(a.apiKeyQuery.length
+      ? [
+          `    if (!res.ok) {`,
+          `      const shown = new URL(url);`,
+          `      if (shown.searchParams.has(${JSON.stringify(a.apiKeyQuery[0])})) shown.searchParams.set(${JSON.stringify(a.apiKeyQuery[0])}, "REDACTED");`,
+          `      throw new ApiError(method, shown.toString(), res.status, data, init.operation);`,
+          `    }`,
+        ]
+      : [`    if (!res.ok) throw new ApiError(method, url.toString(), res.status, data, init.operation);`]),
     `    return data as T;`,
     `  }`,
   ];
