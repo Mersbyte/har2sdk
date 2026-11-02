@@ -61,6 +61,9 @@ interface Call {
   headers: Record<string, string>;
   body: unknown;
 }
+/** Compare whole origins, never URL prefixes ("https://app.acme.test.evil.example" starts with O). */
+const originOf = (url: string): string => new URL(url).origin;
+
 function recorder(status = 200, body: unknown = {}) {
   const calls: Call[] = [];
   const fetch = async (url: URL, init: RequestInit) => {
@@ -94,8 +97,8 @@ describe("H1 credentials and app headers go only to baseUrl's origin (and truste
     const client = new mod[r.plan.clientName]({ token: "secret-1", headers: { "x-tenant": "t1" }, fetch });
     await client.listItems();
     await client.listRates();
-    const own = calls.find((c) => c.url.startsWith(O))!;
-    const third = calls.find((c) => c.url.startsWith(THIRD))!;
+    const own = calls.find((c) => originOf(c.url) === O)!;
+    const third = calls.find((c) => originOf(c.url) === THIRD)!;
     expect(own.headers.authorization).toBe("Bearer secret-1");
     expect(own.headers["x-tenant"]).toBe("t1");
     expect(own.headers["x-app-version"]).toBe("3.4.1");
@@ -154,7 +157,7 @@ describe("H1 credentials and app headers go only to baseUrl's origin (and truste
       const { calls, fetch } = recorder();
       const client = new mod[r.plan.clientName]({ token: "tok", fetch });
       for (const op of r.plan.ops) await client[op.ep.name]();
-      for (const c of calls) expect(c.headers.authorization === undefined, c.url).toBe(!c.url.startsWith(O));
+      for (const c of calls) expect(c.headers.authorization === undefined, c.url).toBe(originOf(c.url) !== O);
     }
   });
 });
