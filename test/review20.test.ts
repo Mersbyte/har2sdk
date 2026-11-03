@@ -33,9 +33,12 @@
  * H-04: reading `<meta name=… content=…>` pairs was quadratic on unclosed tags: seconds per 200 KB HTML body.
  * A1-01: a refused run's overview (exit 2), plain `inspect` and the CLI's warnings printed the value the guard knew
  *        (a dropped request's path, a literal path segment), next to "please report it".
+ * FG-03: `mock --bind` with anything but loopback accepted every Host header, so a DNS-rebinding page could read
+ *        the mock; the warning only mentioned the local network.
  */
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import * as httpModule from "node:http";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -940,6 +943,55 @@ describe("A1-01 the CLI never prints a value the leak guard knows", () => {
     for (let i = 0; i < 4; i++) {
       const u = word(rnd, 3) + pick(rnd, ["", "x", "42"]);
       for (const inspect of [false, true]) expect(run(capture(u), inspect).out.toLowerCase().includes(u), u).toBe(false);
+    }
+  });
+});
+
+// ── FG-03 ──────────────────────────────────────────────────────────────────────
+
+describe("FG-03 mock --bind keeps the Host check: a rebound name gets 403", () => {
+  const start = async (args: string[]) => {
+    const dir = tmp();
+    writeFileSync(join(dir, "cap.har"), har([entry({ url: "https://api.b.test/api/me", resBody: { id: "u_1", plan: "pro" } })]));
+    const port = 41_000 + Math.floor(Math.random() * 9000);
+    const child = spawn(process.execPath, [CLI, "mock", join(dir, "cap.har"), "--port", String(port), ...args], { env: { ...process.env, NO_COLOR: "1" } });
+    let out = "";
+    await new Promise<void>((resolve, reject) => {
+      child.stdout.on("data", (d) => {
+        out += d;
+        if (out.includes("har2sdk mock")) resolve();
+      });
+      child.on("exit", () => reject(new Error(out)));
+    });
+    const get = (host: string) =>
+      new Promise<number>((resolve) => {
+        const req = httpModule.request({ host: "127.0.0.1", port, path: "/api/me", headers: { host: `${host}:${port}` } }, (res: IncomingMessage) => {
+          res.resume();
+          resolve(res.statusCode!);
+        });
+        req.end();
+      });
+    return { get, out: () => out, stop: () => child.kill() };
+  };
+
+  it("the reviewer's case: --bind 0.0.0.0 answers 127.0.0.1 and refuses rebind.evil.example", SLOW, async () => {
+    const m = await start(["--bind", "0.0.0.0"]);
+    try {
+      expect(await m.get("127.0.0.1")).toBe(200);
+      expect(await m.get("rebind.evil.example")).toBe(403);
+      expect(m.out()).toContain("--allow-host");
+    } finally {
+      m.stop();
+    }
+  });
+
+  it("--allow-host adds a name", SLOW, async () => {
+    const m = await start(["--bind", "0.0.0.0", "--allow-host", "mybox.test"]);
+    try {
+      expect(await m.get("mybox.test")).toBe(200);
+      expect(await m.get("other.test")).toBe(403);
+    } finally {
+      m.stop();
     }
   });
 });

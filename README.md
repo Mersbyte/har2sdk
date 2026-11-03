@@ -210,6 +210,7 @@ har2sdk mcp                               Start the MCP server
 --no-enums               Don't emit literal unions
 --no-merge               Don't merge sibling paths into {params}
 --bind <address>         (mock) Interface to listen on (default 127.0.0.1)
+--allow-host <name>      (mock, with --bind) Also answer requests for this host name (repeatable)
 --raw                    (mock) Serve recorded bodies unscrubbed (default: fake data)
 ```
 

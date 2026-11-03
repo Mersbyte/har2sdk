@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
+import { hostname, networkInterfaces } from "node:os";
 import { parseArgs } from "node:util";
 import { clientNameFor, parseAnnotations, type Annotations } from "./annotations.js";
 import { VERSION } from "./codegen.js";
@@ -44,6 +45,7 @@ ${c.bold("Options")}
   --json                   (inspect) machine-readable output
   --raw                    (mock) serve recorded bodies unscrubbed (default: ids faked, personal data and secrets masked)
   --bind <address>         (mock) interface to listen on (default 127.0.0.1)
+  --allow-host <name>      (mock, with --bind) also answer requests for this host name (repeatable)
   -h, --help               Show this help
   -v, --version            Show version
 
@@ -70,6 +72,7 @@ async function main(argv: string[]): Promise<number> {
       redact: { type: "boolean" },
       delay: { type: "string" },
       bind: { type: "string" },
+      "allow-host": { type: "string", multiple: true },
       param: { type: "string", multiple: true },
       "exclude-host": { type: "string", multiple: true },
       "exclude-path": { type: "string", multiple: true },
@@ -203,14 +206,19 @@ async function main(argv: string[]): Promise<number> {
       port,
       host: bind,
       raw: values.raw,
-      ...(/^(127\.0\.0\.1|localhost|::1)$/.test(bind) ? {} : { allowHosts: ["*"] }),
+      // Off loopback, the Host check stays on (a page can rebind any name to this machine): the names this
+      // machine answers to (its addresses, its host name) and --allow-host are accepted, nothing else.
+      ...(/^(127\.0\.0\.1|localhost|::1)$/.test(bind) ? {} : { allowHosts: [...machineHosts(bind), ...(values["allow-host"] ?? [])] }),
       delay: values.delay ? Number(values.delay) : undefined,
       onRequest: ({ method, path, status, endpoint }) =>
         console.log(`${methodColor(method)} ${pad(path, 48)} ${status < 400 ? c.green(String(status)) : c.red(String(status))} ${c.dim(endpoint ?? "no match")}`),
     });
     console.log(`${c.bold("har2sdk mock")} replaying ${model.endpoints.length} endpoints from ${source}`);
     console.log(`  ${c.cyan(`http://localhost:${port}`)}   ${c.dim(`new ${clientNameFor(model, ann)}({ baseUrl: "http://localhost:${port}" })`)}`);
-    if (bind !== "127.0.0.1" && bind !== "localhost") console.log(c.yellow(`  ! Listening on ${bind}: anyone on your network can read the recorded responses.`));
+    if (bind !== "127.0.0.1" && bind !== "localhost") {
+      console.log(c.yellow(`  ! Listening on ${bind}: anyone who can reach it can read the recorded responses.`));
+      console.log(c.dim(`    Requests must name this machine (its address or host name${values["allow-host"]?.length ? ", or --allow-host" : "; add others with --allow-host"}).`));
+    }
     if (values.raw) console.log(c.yellow(`  ! --raw: serving recorded bodies unscrubbed, including any tokens they contain.`));
     console.log("");
     return -1;
@@ -378,3 +386,16 @@ main(process.argv.slice(2)).then(
     process.exitCode = 1;
   },
 );
+
+/** The host names a request to this machine can carry: the bound address, every interface address, the host name. */
+function machineHosts(bind: string): string[] {
+  const out = new Set<string>();
+  if (!/^(0\.0\.0\.0|::|\[::\])$/.test(bind)) out.add(bind.toLowerCase());
+  for (const list of Object.values(networkInterfaces())) {
+    for (const a of list ?? []) out.add(a.family === "IPv6" ? `[${a.address.toLowerCase()}]` : a.address);
+  }
+  const name = hostname().toLowerCase();
+  out.add(name);
+  if (!name.includes(".")) out.add(name + ".local");
+  return [...out];
+}
