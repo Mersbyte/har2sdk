@@ -384,8 +384,11 @@ export class GraphQLError extends Error {
 
 type QueryValue = string | number | boolean | null | undefined | readonly (string | number | boolean)[];
 
+/** A path parameter, encoded. "", "." and ".." would change which path is requested, so they are refused. */
 function enc(value: string | number | boolean): string {
-  return encodeURIComponent(String(value));
+  const s = String(value);
+  if (s === "" || s === "." || s === "..") throw new TypeError(\`A path parameter can't be \${JSON.stringify(s)}: it would change which path is requested.\`);
+  return encodeURIComponent(s);
 }`;
 
 function requestMethod(plan: Plan, ops: readonly PlannedOp[]): string[] {
@@ -449,6 +452,7 @@ function requestMethod(plan: Plan, ops: readonly PlannedOp[]): string[] {
     `        body = init.body as FormData;`,
     `      } else if (init.bodyType === "text") {`,
     `        body = String(init.body);`,
+    `        contentType = init.contentType;`,
     `      } else {`,
     `        body = JSON.stringify(init.body);`,
     `        contentType = init.contentType ?? "application/json";`,
@@ -458,16 +462,22 @@ function requestMethod(plan: Plan, ops: readonly PlannedOp[]): string[] {
     `    // party, on the first request and on every redirect. Per-call headers go to the origin the call was made to.`,
     `    const trusted = [this.baseUrl${multiOrigin ? `, ...(this.options.trustedOrigins ?? [])` : ""}].map((o) => new URL(o).origin);`,
     `    const called = url.origin;`,
+    `    // Header names are case-insensitive: one key per header, lower-cased, so \`Authorization\` in \`headers\``,
+    `    // replaces the token instead of being sent beside it.`,
+    `    const put = (into: Record<string, string>, from: Record<string, string> | undefined): void => {`,
+    `      for (const [key, value] of Object.entries(from ?? {})) into[key.toLowerCase()] = value;`,
+    `    };`,
     `    const headersFor = async (to: URL): Promise<Record<string, string>> => {`,
     `      const headers: Record<string, string> = { accept: "application/json, */*" };`,
     `      if (trusted.includes(to.origin)) {`,
     `        const extra = typeof this.options.headers === "function" ? await this.options.headers() : this.options.headers;`,
-    `        Object.assign(headers, DEFAULT_HEADERS, extra);`,
+    `        put(headers, DEFAULT_HEADERS);`,
+    `        put(headers, extra);`,
     ...authLines,
     ...dropQueryKey,
     `      }`,
     `      if (contentType !== undefined) headers["content-type"] = contentType;`,
-    `      if (to.origin === called) Object.assign(headers, init.options?.headers);`,
+    `      if (to.origin === called) put(headers, init.options?.headers);`,
     `      return headers;`,
     `    };`,
     `    const doFetch = this.options.fetch ?? globalThis.fetch;`,

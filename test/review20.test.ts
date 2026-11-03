@@ -24,6 +24,10 @@
  *        arguments) were strong identity keys: an app word under them refused its own top-level endpoint.
  * A2-02 (part): a mailbox's local part (`orders@shop.example`) refused `/api/v1/orders/48213`, `/api/v1beta/orders`,
  *        `/admin/api/2024-01/orders.json`: only the last segment right after `api` or `v1` was exempt.
+ * C1-03: a path parameter "..", "." or "" changed the path requested (`deleteUserSessions({ userId: ".." })`
+ *        sent `DELETE /api/v1/sessions`).
+ * C1-04: header names were merged case-sensitively: `headers: { Authorization }` was sent next to the token.
+ * C1-05: an XML / CSV / SOAP request body was sent as `text/plain`, not the recorded media type.
  */
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -743,6 +747,72 @@ describe("A2-08/A2-02 weak identity evidence doesn't refuse the app's own endpoi
       const endpoint = entry({ url: `${API}/api/v1/${w}`, resBody: { a: 1 } });
       expect([nav, w, leaksOf([entry({ url: `${API}/api/v1/state`, resBody: { [nav]: w } }), endpoint])]).toEqual([nav, w, 0]);
       expect([person, w, strong(person, w)]).toEqual([person, w, true]);
+    }
+  });
+});
+
+// ── C1-03 / C1-04 / C1-05 ──────────────────────────────────────────────────────
+
+describe("C1-03/C1-04/C1-05 path parameters, header names and text media types", () => {
+  const API = "https://api.shop.example";
+  const JWT = "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJlLXNpZ25hdHVyZQ";
+  const recorder = () => {
+    const calls: { url: string; method: string; headers: Record<string, string> }[] = [];
+    const fetch = async (url: URL, init: RequestInit) => {
+      calls.push({ url: String(url), method: String(init.method), headers: { ...(init.headers as Record<string, string>) } });
+      return new Response("{}", { headers: { "content-type": "application/json" } });
+    };
+    return { calls, fetch };
+  };
+
+  it("C1-03: '..', '.' and '' are refused as path parameters; '../x' is encoded", async () => {
+    const r = generate(har([1001, 1002].map((id) => entry({ method: "DELETE", url: `${API}/api/v1/users/${id}/sessions`, reqHeaders: { authorization: JWT }, resBody: {} }))));
+    const mod = await load(r.files["client.ts"]!);
+    const { calls, fetch } = recorder();
+    const client = new mod[r.plan.clientName]({ token: "t", fetch });
+    const name = r.plan.ops[0]!.ep.name;
+    const param = r.plan.ops[0]!.pathParams[0]!.name;
+    for (const bad of ["..", ".", ""]) await expect(client[name]({ [param]: bad })).rejects.toThrow(/path parameter/);
+    await client[name]({ [param]: "../x" });
+    expect(calls.map((c) => c.url)).toEqual([`${API}/api/v1/users/..%2Fx/sessions`]);
+  });
+
+  it("C1-04: an Authorization in `headers` or per call replaces the token instead of joining it", async () => {
+    const r = generate(har([entry({ url: `${API}/api/v1/items`, reqHeaders: { authorization: JWT, "x-app-version": "3.4.1" }, resBody: [{ id: 1 }] })]));
+    const mod = await load(r.files["client.ts"]!);
+    const { calls, fetch } = recorder();
+    await new mod[r.plan.clientName]({ token: "T", headers: { "X-App-Version": "9" }, fetch }).listItems({ headers: { Authorization: "Bearer OTHER" } });
+    const h = calls[0]!.headers;
+    expect(Object.keys(h).filter((k) => k.toLowerCase() === "authorization")).toEqual(["authorization"]);
+    expect(h.authorization).toBe("Bearer OTHER");
+    expect(Object.keys(h).filter((k) => k.toLowerCase() === "x-app-version")).toEqual(["x-app-version"]);
+    expect(h["x-app-version"]).toBe("9");
+  });
+
+  it("C1-05: XML, CSV and SOAP bodies are sent with the recorded media type (charset kept, other parameters dropped)", async () => {
+    for (const [mime, expected] of [
+      ["application/xml; charset=utf-8", "application/xml; charset=utf-8"],
+      ["text/csv", "text/csv"],
+      ['application/soap+xml; charset=utf-8; action="urn:Secret-77"', "application/soap+xml; charset=utf-8"],
+    ] as const) {
+      const r = generate(har([entry({ method: "POST", url: `${API}/api/v1/import`, reqMime: mime, reqBody: "<a>1</a>", resBody: { ok: true } })]));
+      const mod = await load(r.files["client.ts"]!);
+      const { calls, fetch } = recorder();
+      await new mod[r.plan.clientName]({ fetch })[r.plan.ops[0]!.ep.name]("<b>2</b>");
+      expect(calls[0]!.headers["content-type"]).toBe(expected);
+    }
+  });
+
+  it("generated: random header-name casings never send a header twice", SLOW, async () => {
+    const rnd = rng(20_10);
+    const r = generate(har([entry({ url: `${API}/api/v1/items`, reqHeaders: { authorization: JWT, "x-app-version": "3.4.1" }, resBody: [{ id: 1 }] })]));
+    const mod = await load(r.files["client.ts"]!);
+    for (let i = 0; i < 20; i++) {
+      const casing = (h: string) => [...h].map((c) => (rnd() < 0.5 ? c.toUpperCase() : c)).join("");
+      const { calls, fetch } = recorder();
+      await new mod[r.plan.clientName]({ token: "T", headers: { [casing("x-app-version")]: "1", [casing("accept")]: "text/csv" }, fetch }).listItems({ headers: { [casing("authorization")]: "Bearer X" } });
+      const keys = Object.keys(calls[0]!.headers).map((k) => k.toLowerCase());
+      expect(new Set(keys).size).toBe(keys.length);
     }
   });
 });

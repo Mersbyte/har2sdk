@@ -176,7 +176,7 @@ function planOp(ep: Endpoint, model: ApiModel, registry: TypeRegistry, warnings:
     else if (rb.kind === "text") type = { k: "string" };
     else type = namedBody(registry, rb.shape, hint, [(resource ?? P) + "Input"], resource);
     body = { kind: rb.kind, mimeType: rb.mimeType, type, typeName: hint };
-    const ct = rb.kind === "json" && !ep.graphql && !ep.rpc ? jsonMediaType(rb.mimeType) : undefined;
+    const ct = rb.kind === "json" && !ep.graphql && !ep.rpc ? jsonMediaType(rb.mimeType) : rb.kind === "text" ? textMediaType(rb.mimeType) : undefined;
     if (ct) body.contentType = ct;
   }
 
@@ -338,6 +338,19 @@ const OBJECT_MEMBERS = new Set(Object.getOwnPropertyNames(Object.prototype));
 export function jsonMediaType(mime: string): string | undefined {
   const m = mime.split(";")[0]!.trim().toLowerCase();
   return /^application\/[a-z0-9][a-z0-9!#$&^_.-]{0,100}\+json$/.test(m) ? m : undefined;
+}
+
+/**
+ * The media type a text body was sent with (`application/xml`, `text/csv`, `application/soap+xml`), so the
+ * client sends the same instead of fetch's `text/plain`. Only the type and a plain charset: other parameters
+ * (`boundary`, `profile=…`) can hold data from the capture.
+ */
+export function textMediaType(mime: string): string | undefined {
+  const [type = "", ...params] = mime.split(";");
+  const m = type.trim().toLowerCase();
+  if (!/^[a-z]+\/[a-z0-9][a-z0-9!#$&^_.+-]{0,100}$/.test(m) || m === "text/plain") return undefined;
+  const charset = params.map((p) => p.trim().toLowerCase()).find((p) => /^charset=[\w.-]{1,40}$/.test(p));
+  return charset ? `${m}; ${charset}` : m;
 }
 
 /**
