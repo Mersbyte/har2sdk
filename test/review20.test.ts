@@ -7,6 +7,9 @@
  *        with more endpoints got the token and the app's own API got none.
  * C2-01: a JSON request body that is an array of objects (also JSON Patch, `eth_call` params, tRPC batch input)
  *        declared its type name twice, so client.ts didn't compile, and the CLI still exited 0.
+ * DJ-01/DJ-02 (and B2-01): `openapi.json` path keys kept quotes, backticks, `${…}` and braces from a recorded URL raw:
+ *        swagger-typescript-api 13.12.1 and openapi-typescript-codegen pasted them into code that ran, and a recorded
+ *        `{tenantId}` became a path template with no parameter.
  */
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -15,6 +18,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { Validator } from "@seriousme/openapi-schema-validator";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { assertUniqueDeclarations } from "../src/codegen.js";
 import { generateFromHar } from "../src/index.js";
@@ -376,5 +380,52 @@ describe("C2-01 an array request body gets an alias and an item type, and the cl
     }
     const r = generate(har(ops));
     expect(compile(r.files["client.ts"]!), bodies.join("\n")).toBe("");
+  });
+});
+
+// ── DJ-01 / DJ-02 ──────────────────────────────────────────────────────────────
+
+describe("DJ-01/DJ-02 openapi.json path keys are encoded: no quote, backtick, brace or comment end from the capture", () => {
+  const A = "https://api.evil.test";
+  /** A path key holds only URL characters that can't end a string or a comment, and every {template} is a declared parameter. */
+  const checkSpec = async (spec: any) => {
+    for (const [key, item] of Object.entries<any>(spec.paths)) {
+      expect(key, key).not.toMatch(/["'`\\<>^|\s]|\*\/|\$\{/);
+      const declared = new Set<string>();
+      for (const op of Object.values<any>(item)) for (const p of op.parameters ?? []) if (p.in === "path") declared.add(p.name);
+      for (const op of Object.values<any>(item)) if (op.summary) expect(op.summary).not.toMatch(/["'`\\]|\*\/|\$\{/);
+      for (const m of key.matchAll(/\{([^}]*)\}/g)) expect(declared.has(m[1]!), `${key}: {${m[1]}}`).toBe(true);
+    }
+    expect(await new Validator().validate(spec)).toMatchObject({ valid: true });
+  };
+
+  it("the reviewer's capture: quotes, a backtick, ${…} and an unexpanded {tenantId}", async () => {
+    const segs = ["'+process.exit(7)+'", "`+process.exit(8)+`", "${process.exit(9)}", '"+process.exit(10)+"', "{tenantId}", "{{id}}", "a*"];
+    const entries = segs.flatMap((seg, i) => [0, 1, 2].map(() => entry({ url: `${A}/v1/x${i}/${encodeURIComponent(seg)}/list`, resBody: [{ id: 1 }] })));
+    const r = generateFromHar(har(entries));
+    const spec = JSON.parse(r.files["openapi.json"]!);
+    await checkSpec(spec);
+    expect(Object.keys(spec.paths)).toContain("/v1/x4/%7BtenantId%7D/list");
+    expect(r.files["openapi.json"]).not.toContain("process.exit(7)+'");
+  });
+
+  it("/odata/$metadata keeps its $", () => {
+    const r = generateFromHar(har([entry({ url: `${A}/odata/$metadata`, resBody: { a: 1 } })]));
+    expect(Object.keys(JSON.parse(r.files["openapi.json"]!).paths)).toEqual(["/odata/$metadata"]);
+  });
+
+  it("generated: random hostile literal segments never reach a path key or summary raw", SLOW, async () => {
+    const rnd = rng(20_4);
+    const alphabet = "'\"`${}()\\+;*/!<>^| ab";
+    for (let i = 0; i < 12; i++) {
+      const entries = [];
+      for (let k = 0; k < 4; k++) {
+        let seg = "";
+        for (let j = 0; j < 3 + Math.floor(rnd() * 8); j++) seg += alphabet[Math.floor(rnd() * alphabet.length)];
+        for (let n = 0; n < 3; n++) entries.push(entry({ url: `${A}/v1/r${k}/${encodeURIComponent(seg)}/list`, resBody: [{ id: 1 }] }));
+      }
+      const r = generateFromHar(har(entries));
+      await checkSpec(JSON.parse(r.files["openapi.json"]!));
+    }
   });
 });

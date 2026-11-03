@@ -110,7 +110,7 @@ function restOperation(op: PlannedOp, opts: OpenApiOptions): Record<string, unkn
   const operation: Record<string, unknown> = {
     operationId: ep.name,
     tags: [ep.tag],
-    summary: ep.description?.split(/(?<=\.)\s/)[0] ?? `${ep.method} ${ep.path}`,
+    summary: ep.description?.split(/(?<=\.)\s/)[0] ?? `${ep.method} ${specPath(ep)}`,
     ...(ep.description ? { description: ep.description } : {}),
     ...(parameters.length ? { parameters } : {}),
   };
@@ -267,12 +267,14 @@ function putOperation(item: Record<string, unknown>, method: string, operation: 
 }
 
 /**
- * The path as an OpenAPI path key. A literal segment that holds "/", "?", "#" or "%" once decoded
- * (GitLab's `platform%2Fbackend`) is written encoded, as the client requests it: decoded, it would name
- * another resource.
+ * The path as an OpenAPI path key. Literal text is percent-encoded as the client requests it, plus `'` and `*`: so a
+ * segment holding "/", "?", "#" or "%" once decoded (GitLab's `platform%2Fbackend`) doesn't name another
+ * resource, a recorded `{name}` (an unexpanded front-end template) isn't taken for a path parameter, and quotes,
+ * backticks, backslashes, `${` and `*` + `/` from a recorded URL can't close a string or a comment in code a downstream
+ * generator writes from the key. `$`, `@`, `:` and the like stay as recorded (`/odata/$metadata`).
  */
 function specPath(ep: { path: string; trailingSlash?: true; tokens: readonly ({ kind: "literal"; value: string } | { kind: "param"; name: string; suffix?: string })[] }): string {
-  if (!ep.tokens.some((t) => (t.kind === "literal" ? t.value : (t.suffix ?? "")).match(/[%/?#]/))) return ep.path;
-  const enc = (x: string) => x.replace(/[%/?#]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0"));
+  const enc = (x: string) => encodeURIComponent(x).replace(/%(40|3A|21|24|26|28|29|2B|2C|3B|3D)/gi, (m) => decodeURIComponent(m)).replace(/['*]/g, (c) => (c === "'" ? "%27" : "%2A"));
+  if (!ep.tokens.some((t) => { const x = t.kind === "literal" ? t.value : (t.suffix ?? ""); return enc(x) !== x; })) return ep.path;
   return "/" + ep.tokens.map((t) => (t.kind === "param" ? `{${t.name}}${enc(t.suffix ?? "")}` : enc(t.value))).join("/") + (ep.trailingSlash ? "/" : "");
 }
