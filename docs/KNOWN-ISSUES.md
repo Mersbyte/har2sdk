@@ -1,6 +1,16 @@
 # Known issues
 
-Problems found during the 0.6.0 work that were not fixed, with the reason.
+Problems found by reviews that are not fixed yet, with the reason. The newest are first; each review's full list is in CHANGELOG.md.
+
+## From the 0.6.15 audit (review 20), not fixed in 0.6.16
+
+Fixed findings are in the 0.6.16 entry of CHANGELOG.md. These are open:
+
+- **Privacy: carriers the guard doesn't read.** A value whose only evidence is in a YAML body, a form-encoded *response*, a `Content-Disposition` file name, URL userinfo (`https://user@host`) or an `@mention` inside text isn't collected, so the same value used elsewhere can stay a path literal (A1-05). A person's own subdomain (`zkaya.app.example`) is open too (A1-03). A2-03 (the guard reporting a host name) is left as it is on purpose: not reporting host names would also stop reporting such a subdomain.
+- **False refusals.** A mailbox's local part (`cart@shop.example`) followed by another word in a path (`/api/v1/cart/items`) is still taken as a possible username, the same shape as `/api/v1/okilic/projects`, so such an app can be refused (A2-02, in part; 36 of 320 generated mailbox shapes). Other refusal cases from the audit: A2-01, A2-04 to A2-07. A refusal never writes the value; `--param` or annotations get past it.
+- **Correctness for less common API styles:** GraphQL served under a templated path (C2-02); query parameters dropped on RPC calls (C2-04); Google-style custom methods such as `/v1/operations/{id}:cancel` (C2-05); OData (C2-06); sibling parameters (C2-10). Also DJ-03, E-01, E-09 and H-01, and the audit's Low findings.
+
+## From the 0.6.0 work
 
 ## Privacy
 
