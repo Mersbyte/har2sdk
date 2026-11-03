@@ -28,19 +28,24 @@
  *        sent `DELETE /api/v1/sessions`).
  * C1-04: header names were merged case-sensitively: `headers: { Authorization }` was sent next to the token.
  * C1-05: an XML / CSV / SOAP request body was sent as `text/plain`, not the recorded media type.
+ * E-04: MCP `generate_sdk` with no matching endpoint (a typo in `hosts`) replaced a working client.ts with an
+ *        empty one and reported success.
  */
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Validator } from "@seriousme/openapi-schema-validator";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { assertUniqueDeclarations } from "../src/codegen.js";
 import { generateFromHar } from "../src/index.js";
 import { isJsonPrefix } from "../src/leak.js";
+import { createMcpServer } from "../src/mcp.js";
 import { listenMock } from "../src/mock.js";
 import { ROOT, entry, har } from "./helpers.js";
 
@@ -813,6 +818,50 @@ describe("C1-03/C1-04/C1-05 path parameters, header names and text media types",
       await new mod[r.plan.clientName]({ token: "T", headers: { [casing("x-app-version")]: "1", [casing("accept")]: "text/csv" }, fetch }).listItems({ headers: { [casing("authorization")]: "Bearer X" } });
       const keys = Object.keys(calls[0]!.headers).map((k) => k.toLowerCase());
       expect(new Set(keys).size).toBe(keys.length);
+    }
+  });
+});
+
+// ── E-04 ───────────────────────────────────────────────────────────────────────
+
+describe("E-04 generate_sdk with no matching endpoint fails and keeps the existing client", () => {
+  const client = new Client({ name: "test", version: "0.0.0" });
+  const server = createMcpServer();
+  beforeAll(async () => {
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(a), client.connect(b)]);
+  });
+  afterAll(async () => {
+    await client.close();
+  });
+  const call = async (name: string, args: Record<string, unknown>) => {
+    const res = (await client.callTool({ name, arguments: args })) as { content: { text: string }[]; isError?: boolean };
+    return { text: res.content.map((c) => c.text).join("\n"), isError: !!res.isError };
+  };
+
+  it("the reviewer's case: a typo in hosts after a good run", async () => {
+    const dir = tmp();
+    const path = join(dir, "capture.har");
+    writeFileSync(path, har([entry({ url: "https://api.acme-shop.test/api/v1/items", resBody: [{ id: 1, price: 2 }] })]));
+    const out = join(dir, "out");
+    expect((await call("generate_sdk", { har_path: path, out_dir: out })).isError).toBe(false);
+    const before = readFileSync(join(out, "client.ts"), "utf8");
+    const res = await call("generate_sdk", { har_path: path, out_dir: out, hosts: ["api.acme-shop.tset"] });
+    expect(res.isError).toBe(true);
+    expect(res.text).toContain("None of the 1 requests is on api.acme-shop.tset");
+    expect(readFileSync(join(out, "client.ts"), "utf8")).toBe(before);
+  });
+
+  it("generated: random host lists write iff at least one endpoint matches", SLOW, async () => {
+    const rnd = rng(20_11);
+    const hosts = ["api.acme-shop.test", "rates.partner.test"];
+    const dir = tmp();
+    const path = join(dir, "capture.har");
+    writeFileSync(path, har([entry({ url: `https://${hosts[0]}/api/v1/items`, resBody: [{ id: 1 }] }), entry({ url: `https://${hosts[1]}/v1/rates`, resBody: { usd: 1 } })]));
+    for (let i = 0; i < 8; i++) {
+      const list = [rnd() < 0.5 ? hosts[0]! : `${word(rnd)}.test`, ...(rnd() < 0.5 ? [hosts[1]!] : [])];
+      const res = await call("generate_sdk", { har_path: path, out_dir: join(dir, `out${i}`), hosts: list });
+      expect(res.isError, list.join()).toBe(!list.some((h) => hosts.includes(h)));
     }
   });
 });
