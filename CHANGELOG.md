@@ -2,14 +2,19 @@
 
 ## 0.6.17
 
-Fixes from a twenty-first review: a security pass by another AI assistant against the published 0.6.16. Five findings fixed, each reproduced with the reviewer's input before it was fixed. Tests are in `test/review21.test.ts`, with generated variants. `test/fixtures/demo-snapshot.json` is unchanged.
+Fixes from a twenty-first review (a security pass by another AI assistant against the published 0.6.16) and a twenty-second (the MCP server as a model drives it). Eight findings fixed, each reproduced with the reviewer's input before it was fixed. Tests are in `test/review21.test.ts` and `test/review22.test.ts`, with generated variants. `test/fixtures/demo-snapshot.json` is unchanged.
 
 **Security**
 - MCP `generate_sdk` accepted any `base_url`. The client sends the user's token to its base URL, and text in a capture can steer a model, so a crafted capture could have a model point the client at another site. `base_url` must now be one of the capture's origins (any path on it) or a localhost URL, without a user name or password; another address is the user's call (`--base-url`, or `baseUrl` in code) (K1).
 - A username that appeared only inside a JWT payload (`preferred_username: "zeynepkaya"` in `Authorization`) was written into `client.ts` at `/profile/zeynepkaya`. A JWT's payload, in a header, a cookie or a body, is now read as a person's JSON, and claims that name its user (`preferred_username`, `username`, `nickname`, `upn`, `unique_name`, `email`, `name`…) are identities. An encrypted JWT (JWE) or one split across cookies is still not read (K2).
 - `mock --raw` allowed CORS from every recorded origin, so a third party the app called could read the unscrubbed recorded bodies from a page open in the user's browser. With `--raw`, CORS is allowed from localhost only; the default mock is unchanged (K3).
 - The MCP server read a link named `capture.har` whatever its target was. The link's real target must now be a `.har` or `.json` file too, as SECURITY.md said (K4).
+- (Review 22, the MCP server as a model drives it.) `base_url` could still be any origin in the capture, and a crafted capture can "call" an attacker's site; `hosts` moved the client's default address too (`hosts: ["evil.example"]` gave `DEFAULT_BASE_URL = "https://evil.example"`, without a warning). Over MCP the client's address is now the capture's own API origin, worked out from the whole capture (the origin that got credentials, else the one with most endpoints) whatever `hosts` keeps, or a localhost URL; anything else is refused with a pointer to the CLI's `--base-url` / `--host` (M1, M2).
+- (Review 22.) MCP `generate_sdk` had an `allow_leaks` parameter, so a model could write files the leak guard refused. It is removed, and the refusal no longer mentions an override. The CLI's `--allow-leaks` stays: there the user types it (M3).
 - A base URL with a user name or password (`--base-url https://u:p@host`, or `baseUrl` in the library) was written into `client.ts`, a file people commit. It is refused now, without echoing it back; pass credentials to the client at run time (K5).
+
+**Docs**
+- SECURITY.md lists three more limits: annotations that rename a type to a built-in or helper name; the mock with recorded 1xx and 0 statuses; and what a model sees over MCP (review 22).
 
 **Not changed** (from the same review): a path value with no evidence (`/@user` never named elsewhere, an IP address, a short-link code) stays a literal, and is listed in the path-words list (the documented limit).
 
