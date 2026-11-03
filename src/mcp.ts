@@ -48,6 +48,9 @@ async function load(harPath: string, hosts?: string[]): Promise<{ model: ApiMode
   const path = resolvePath(harPath);
   // Only read capture files: this tool must not become a way to read arbitrary files.
   if (!/\.(har|json)$/i.test(path)) throw new Error(`Expected a .har (or .json) file, got "${path.split(/[\\/]/).pop()}".`);
+  // A link named `capture.har` must not read another kind of file: the real target must be a capture too.
+  const real = await realpath(path);
+  if (!/\.(har|json)$/i.test(real)) throw new Error(`"${path.split(/[\\/]/).pop()}" is a link to a file that isn't a .har (or .json) file.`);
   const st = await stat(path);
   if (st.isDirectory()) throw new Error(`"${path.split(/[\\/]/).pop()}" is a folder, not a HAR file. Pass the .har file inside it.`);
   const key = JSON.stringify(hosts ?? []);
@@ -57,6 +60,25 @@ async function load(harPath: string, hosts?: string[]): Promise<{ model: ApiMode
   const model = analyzeExchanges(exchanges, { hosts, source: path.split(/[\\/]/).pop() });
   cache.set(path, { mtimeMs: st.mtimeMs, hosts: key, model, exchanges });
   return { model: structuredClone(model), exchanges, path };
+}
+
+/**
+ * The base URL is where the generated client sends the user's token. Over MCP a model picks it, and text in
+ * the capture can steer a model, so only an origin the capture talked to or a local address is accepted.
+ * Any other URL is the user's call: the CLI's `--base-url`, or the client's `baseUrl` option.
+ */
+export function mcpBaseUrlProblem(baseUrl: string, recorded: readonly string[]): string | undefined {
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    return `base_url isn't a URL.`;
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return `base_url must be an http(s) URL.`;
+  if (url.username || url.password) return `base_url must not contain a user name or password.`;
+  const local = /^(localhost|127\.0\.0\.1|\[::1\])$/i.test(url.hostname);
+  if (local || recorded.includes(url.origin)) return undefined;
+  return `base_url must be one of the capture's origins or a localhost URL: the client sends credentials there. For another address, run \`har2sdk <capture.har> --base-url <url>\` yourself, or pass \`baseUrl\` when you create the client.`;
 }
 
 /** The annotations already in out_dir: none if there's no file, an error if the file can't be read as annotations. */
@@ -217,7 +239,10 @@ export function createMcpServer(): McpServer {
       inputSchema: {
         har_path: harPath,
         out_dir: z.string().optional().describe("Output directory (default: har2sdk-out next to the HAR file)"),
-        base_url: z.string().optional().describe("Override the base URL baked into the SDK"),
+        base_url: z
+          .string()
+          .optional()
+          .describe("Override the base URL baked into the SDK: one of the capture's origins (another path on it is fine) or a localhost URL. The client sends credentials to it."),
         allow_leaks: z.boolean().optional().describe("Write the files even if the leak guard finds recorded values in them (only when the user confirms it's a false positive)"),
         hosts,
         annotations: annotationSchema,
@@ -264,6 +289,10 @@ export function createMcpServer(): McpServer {
           const existingAnn = await readAnnotations(annFile);
           if (!existingAnn.ok) return fail(scrubText(`${annFile} exists but ${existingAnn.error}; nothing was written. Fix or move that file, then call generate_sdk again.`, model.taint));
           const merged = mergeAnnotations(existingAnn.value, annotations as Annotations | undefined);
+          if (base_url !== undefined) {
+            const why = mcpBaseUrlProblem(base_url, model.origins.map((o) => o.origin));
+            if (why) return fail(why);
+          }
           const result = generateFromModel(model, exchanges, { annotations: merged, baseUrl: base_url, source: model.source });
           if (result.leaks.length && !allow_leaks) {
             return fail(scrubText(`Nothing written: ${result.warnings.find((w) => w.startsWith("Leak guard")) ?? "the leak guard found recorded values."}`, model.taint));

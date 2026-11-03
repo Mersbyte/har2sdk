@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.17
+
+Fixes from a twenty-first review: a security pass by another AI assistant against the published 0.6.16. Four findings fixed, each reproduced with the reviewer's input before it was fixed. Tests are in `test/review21.test.ts`, with generated variants. `test/fixtures/demo-snapshot.json` is unchanged.
+
+**Security**
+- MCP `generate_sdk` accepted any `base_url`. The client sends the user's token to its base URL, and text in a capture can steer a model, so a crafted capture could have a model point the client at another site. `base_url` must now be one of the capture's origins (any path on it) or a localhost URL, without a user name or password; another address is the user's call (`--base-url`, or `baseUrl` in code) (K1).
+- A username that appeared only inside a JWT payload (`preferred_username: "zeynepkaya"` in `Authorization`) was written into `client.ts` at `/profile/zeynepkaya`. A JWT's payload, in a header, a cookie or a body, is now read as a person's JSON, and claims that name its user (`preferred_username`, `username`, `nickname`, `upn`, `unique_name`, `email`, `name`…) are identities. An encrypted JWT (JWE) or one split across cookies is still not read (K2).
+- `mock --raw` allowed CORS from every recorded origin, so a third party the app called could read the unscrubbed recorded bodies from a page open in the user's browser. With `--raw`, CORS is allowed from localhost only; the default mock is unchanged (K3).
+- The MCP server read a link named `capture.har` whatever its target was. The link's real target must now be a `.har` or `.json` file too, as SECURITY.md said (K4).
+
+**Not changed** (from the same review): a path value with no evidence (`/@user` never named elsewhere, an IP address, a short-link code) stays a literal, and is listed in the path-words list (the documented limit); a password in a URL given to `--base-url` is written into `client.ts`, since the user typed it.
+
 ## 0.6.16
 
 Fixes from a twentieth review: a full audit before launch (v0.6.15). Three High and seventeen Medium findings are fixed here (plus B2-01, rated Low/Medium), and one more Medium in part. Each was reproduced with the auditor's input before it was fixed, and each test was checked to fail without its fix. Tests are in `test/review20.test.ts`, with generated variants. `test/fixtures/demo-snapshot.json` is unchanged. Other findings of the audit are left for later (listed at the end).

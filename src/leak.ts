@@ -348,6 +348,9 @@ function personObject(obj: Record<string, unknown>): boolean {
   return false;
 }
 
+/** JWT claims whose value names the token's user. */
+const JWT_USER_CLAIMS = new Set(["preferred_username", "username", "user_name", "nickname", "upn", "unique_name", "cognito:username", "login", "email", "name", "given_name", "family_name"]);
+
 export class TaintCollector {
   readonly taint: Taint = emptyTaint();
 
@@ -356,6 +359,9 @@ export class TaintCollector {
   add(value: string, key?: string, person = true, bare = false): void {
     const v = value.trim();
     if (!v || v.length > 4000) return;
+    // A JWT (in `Authorization`, a cookie, a body) carries claims about its user in its payload:
+    // `preferred_username`, `email`, `name`… are evidence like the same keys in a response.
+    if (!this.inJwt && v.includes("eyJ")) this.jwtClaims(v);
     const lower = v.toLowerCase();
     const len = dataLength(v);
     const usable = len >= 3 && !COMMON.has(lower) && !VERSIONISH.test(v);
@@ -502,6 +508,31 @@ export class TaintCollector {
     if (Number.isInteger(n) && Math.abs(n) < 1000 && !key) return;
     const s = String(n);
     if (s.replace(/[-.]/g, "").length >= 6 || (s.length >= 4 && keyKind(key) === 1)) this.taint.values.add(s);
+  }
+
+  private inJwt = false;
+
+  /** The payload of a JWT (`eyJ….eyJ….sig`, alone or after an auth scheme), read as a person's JSON. */
+  private jwtClaims(v: string): void {
+    const m = /^(?:[A-Za-z][\w-]{0,20}\s+)?eyJ[\w-]{2,4000}\.(eyJ[\w-]{2,4000})\.[\w-]{0,4000}$/.exec(v);
+    if (!m) return;
+    let payload: unknown;
+    try {
+      payload = JSON.parse(Buffer.from(m[1]!.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8"));
+    } catch {
+      return;
+    }
+    if (payload === null || typeof payload !== "object" || Array.isArray(payload)) return;
+    this.inJwt = true;
+    try {
+      // Registered claims that name the user (OIDC, Azure AD, Cognito): identities whatever they look like.
+      for (const [k, val] of Object.entries(payload)) {
+        if (typeof val === "string" && JWT_USER_CLAIMS.has(k.toLowerCase())) this.addAlways(val, true);
+      }
+      this.json(payload, undefined, 0, undefined, true);
+    } finally {
+      this.inJwt = false;
+    }
   }
 
   /**
