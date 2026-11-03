@@ -379,16 +379,23 @@ function requestMethod(plan: Plan, ops: readonly PlannedOp[]): string[] {
   const hasToken = a.bearer || (!a.basic && !a.apiKeyHeaders.length && !a.apiKeyQuery.length && !a.cookieNames.length);
   if (hasToken) {
     authLines.push(
-      `    if (this.options.token !== undefined) {`,
-      `      const token = typeof this.options.token === "function" ? await this.options.token() : this.options.token;`,
-      a.tokenScheme ? `      headers["authorization"] = ${JSON.stringify(a.tokenScheme + " ")} + token;` : `      headers["authorization"] = token;`,
-      `    }`,
+      `      if (this.options.token !== undefined) {`,
+      `        const token = typeof this.options.token === "function" ? await this.options.token() : this.options.token;`,
+      a.tokenScheme ? `        headers["authorization"] = ${JSON.stringify(a.tokenScheme + " ")} + token;` : `        headers["authorization"] = token;`,
+      `      }`,
     );
   }
-  if (a.basic) authLines.push(`    if (this.options.basicAuth) headers["authorization"] = "Basic " + btoa(\`\${this.options.basicAuth.username}:\${this.options.basicAuth.password}\`);`);
-  if (a.apiKeyHeaders.length) authLines.push(`    if (this.options.apiKey !== undefined) headers[${JSON.stringify(a.apiKeyHeaders[0])}] = this.options.apiKey;`);
-  else if (a.apiKeyQuery.length) authLines.push(`    if (this.options.apiKey !== undefined) url.searchParams.set(${JSON.stringify(a.apiKeyQuery[0])}, this.options.apiKey);`);
-  if (a.cookieNames.length) authLines.push(`    if (this.options.cookie !== undefined) headers["cookie"] = this.options.cookie;`);
+  if (a.basic) authLines.push(`      if (this.options.basicAuth) headers["authorization"] = "Basic " + btoa(\`\${this.options.basicAuth.username}:\${this.options.basicAuth.password}\`);`);
+  if (a.apiKeyHeaders.length) authLines.push(`      if (this.options.apiKey !== undefined) headers[${JSON.stringify(a.apiKeyHeaders[0])}] = this.options.apiKey;`);
+  else if (a.apiKeyQuery.length) authLines.push(`      if (this.options.apiKey !== undefined) to.searchParams.set(${JSON.stringify(a.apiKeyQuery[0])}, this.options.apiKey);`);
+  if (a.cookieNames.length) authLines.push(`      if (this.options.cookie !== undefined) headers["cookie"] = this.options.cookie;`);
+  // A redirect that leaves the trusted origins must not carry an API key the server copied into `Location`.
+  const dropQueryKey = a.apiKeyQuery.length
+    ? [
+        `    } else if (this.options.apiKey !== undefined && to.searchParams.get(${JSON.stringify(a.apiKeyQuery[0])}) === this.options.apiKey) {`,
+        `      to.searchParams.delete(${JSON.stringify(a.apiKeyQuery[0])});`,
+      ]
+    : [];
 
   return [
     `  private async request<T>(`,
@@ -405,29 +412,14 @@ function requestMethod(plan: Plan, ops: readonly PlannedOp[]): string[] {
     `      operation?: string | undefined;`,
     `    } = {},`,
     `  ): Promise<T> {`,
-    `    const url = new URL((init.origin ?? this.baseUrl).replace(/\\/+$/, "") + path);`,
+    `    let url = new URL((init.origin ?? this.baseUrl).replace(/\\/+$/, "") + path);`,
     `    for (const [key, value] of Object.entries(init.query ?? {})) {`,
     `      if (value === undefined || value === null) continue;`,
     `      if (Array.isArray(value)) for (const item of value) url.searchParams.append(key, String(item));`,
     `      else url.searchParams.set(key, String(value));`,
     `    }`,
-    ...(multiOrigin
-      ? [
-          `    // Credentials and app-wide headers go to baseUrl's origin (and trustedOrigins) only, never to a third party.`,
-          `    const own = [this.baseUrl, ...(this.options.trustedOrigins ?? [])].some((o) => new URL(o).origin === url.origin);`,
-          `    const headers: Record<string, string> = { accept: "application/json, */*" };`,
-          `    if (own) {`,
-          `      const extra = typeof this.options.headers === "function" ? await this.options.headers() : this.options.headers;`,
-          `      Object.assign(headers, DEFAULT_HEADERS, extra);`,
-          ...authLines.map((l) => "  " + l),
-          `    }`,
-        ]
-      : [
-          `    const extra = typeof this.options.headers === "function" ? await this.options.headers() : this.options.headers;`,
-          `    const headers: Record<string, string> = { accept: "application/json, */*", ...DEFAULT_HEADERS, ...extra };`,
-          ...authLines,
-        ]),
     `    let body: string | URLSearchParams | FormData | undefined;`,
+    `    let contentType: string | undefined;`,
     `    if (init.body !== undefined) {`,
     `      if (init.bodyType === "form") {`,
     `        const form = new URLSearchParams();`,
@@ -443,16 +435,55 @@ function requestMethod(plan: Plan, ops: readonly PlannedOp[]): string[] {
     `        body = String(init.body);`,
     `      } else {`,
     `        body = JSON.stringify(init.body);`,
-    `        headers["content-type"] = init.contentType ?? "application/json";`,
+    `        contentType = init.contentType ?? "application/json";`,
     `      }`,
     `    }`,
-    `    Object.assign(headers, init.options?.headers);`,
+    `    // Credentials and app-wide headers go to baseUrl's origin${multiOrigin ? " (and trustedOrigins)" : ""} only, never to a third`,
+    `    // party, on the first request and on every redirect. Per-call headers go to the origin the call was made to.`,
+    `    const trusted = [this.baseUrl${multiOrigin ? `, ...(this.options.trustedOrigins ?? [])` : ""}].map((o) => new URL(o).origin);`,
+    `    const called = url.origin;`,
+    `    const headersFor = async (to: URL): Promise<Record<string, string>> => {`,
+    `      const headers: Record<string, string> = { accept: "application/json, */*" };`,
+    `      if (trusted.includes(to.origin)) {`,
+    `        const extra = typeof this.options.headers === "function" ? await this.options.headers() : this.options.headers;`,
+    `        Object.assign(headers, DEFAULT_HEADERS, extra);`,
+    ...authLines,
+    ...dropQueryKey,
+    `      }`,
+    `      if (contentType !== undefined) headers["content-type"] = contentType;`,
+    `      if (to.origin === called) Object.assign(headers, init.options?.headers);`,
+    `      return headers;`,
+    `    };`,
     `    const doFetch = this.options.fetch ?? globalThis.fetch;`,
-    `    const request: NonNullable<Parameters<typeof fetch>[1]> = { method, headers };`,
-    `    if (body !== undefined) request.body = body;`,
-    `    if (init.options?.signal) request.signal = init.options.signal;`,
-    `    if (this.options.credentials) request.credentials = this.options.credentials;`,
-    `    const res = await doFetch(url, request);`,
+    `    const send = async (to: URL): Promise<Response> => {`,
+    `      // "manual": a redirect is followed below, where each hop's origin is checked again.`,
+    `      const request: NonNullable<Parameters<typeof fetch>[1]> = { method, headers: await headersFor(to), redirect: "manual" };`,
+    `      if (body !== undefined) request.body = body;`,
+    `      if (init.options?.signal) request.signal = init.options.signal;`,
+    `      if (this.options.credentials) request.credentials = this.options.credentials;`,
+    `      return doFetch(to, request);`,
+    `    };`,
+    `    let res = await send(url);`,
+    `    for (let hops = 0; [301, 302, 303, 307, 308].includes(res.status) && res.headers.has("location"); hops++) {`,
+    `      if (hops === 20) throw new TypeError(\`\${method} \${url.origin}\${url.pathname}: too many redirects\`);`,
+    `      const next = new URL(res.headers.get("location")!, url);`,
+    `      try {`,
+    `        await res.body?.cancel();`,
+    `      } catch {`,
+    `        /* nothing to release */`,
+    `      }`,
+    `      if ((res.status === 303 && method !== "HEAD") || ((res.status === 301 || res.status === 302) && method === "POST")) {`,
+    `        method = "GET";`,
+    `        body = undefined;`,
+    `        contentType = undefined;`,
+    `      }`,
+    `      url = next;`,
+    `      res = await send(url);`,
+    `    }`,
+    `    if (res.type === "opaqueredirect") {`,
+    `      // Browsers hide a redirect's target from "manual" fetches, so it can't be checked: not followed.`,
+    `      throw new TypeError(\`\${method} \${url.origin}\${url.pathname} redirected; the browser hides where to, so har2sdk didn't follow it with your credentials. Call the final URL directly.\`);`,
+    `    }`,
     `    if (init.responseType === "binary" && res.ok) return (await res.blob()) as T;`,
     `    const text = await res.text();`,
     `    let data: unknown = text === "" ? undefined : text;`,
