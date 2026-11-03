@@ -3,6 +3,8 @@
  * reviewer's input before it was fixed, plus a generated variant where one fits. IDs are the review's.
  *
  * C1-01: a redirect carried the API-key header, `headers` and the recorded default headers to another origin.
+ * C1-02: `baseUrl` (the only origin that gets credentials) was the origin with the most endpoints, so a vendor
+ *        with more endpoints got the token and the app's own API got none.
  */
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -217,5 +219,80 @@ describe("C1-01 credentials and app headers never follow a redirect to another o
       for (const s of b.seen) expect(leaked(s), `${style} ${code}`).toEqual([]);
     }
     code = 0;
+  });
+});
+
+// ── C1-02 ──────────────────────────────────────────────────────────────────────
+
+describe("C1-02 baseUrl is the origin the app sent its credentials to, not the biggest one", () => {
+  const APP = "https://app.acme.test";
+  const MAPS = "https://tiles.mapvendor.test";
+  const JWT = "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJlLXNpZ25hdHVyZQ";
+  const recorder = () => {
+    const calls: { url: string; headers: Record<string, string> }[] = [];
+    const fetch = async (url: URL, init: RequestInit) => {
+      calls.push({ url: String(url), headers: { ...(init.headers as Record<string, string>) } });
+      return new Response("{}", { headers: { "content-type": "application/json" } });
+    };
+    return { calls, fetch };
+  };
+
+  it("the reviewer's capture: 2 app endpoints with auth, 5 vendor endpoints without", async () => {
+    const auth = { authorization: JWT, "x-api-key": "k_live_3f9a8b7c6d5e4f3a" };
+    const r = generate(
+      har([
+        entry({ url: APP + "/api/v1/orders", reqHeaders: auth, resBody: [{ id: 1, total: 5 }] }),
+        entry({ url: APP + "/api/v1/profile", reqHeaders: auth, resBody: { id: 1, plan: "pro" } }),
+        ...["styles", "fonts", "sprites", "tilesets", "geocode"].map((p) => entry({ url: `${MAPS}/v4/${p}`, resBody: { ok: true } })),
+      ]),
+    );
+    expect(r.plan.baseUrl).toBe(APP);
+    const mod = await load(r.files["client.ts"]!);
+    const { calls, fetch } = recorder();
+    const c = new mod[r.plan.clientName]({ token: "USER-TOKEN", apiKey: "USER-KEY", fetch });
+    for (const op of r.plan.ops) await c[op.ep.name]();
+    for (const call of calls) expect(call.headers.authorization === "Bearer USER-TOKEN", call.url).toBe(new URL(call.url).origin === APP);
+  });
+
+  it("among origins with credentials the strongest wins, and the user is told about the other", () => {
+    const r = generate(
+      har([
+        entry({ url: APP + "/api/v1/orders", reqHeaders: { authorization: JWT }, resBody: [{ id: 1, total: 5 }] }),
+        ...["styles", "fonts", "sprites"].map((p) => entry({ url: `${MAPS}/v4/${p}?key=pk_3f9a8b7c6d5e4f3a`, resBody: { ok: true } })),
+      ]),
+    );
+    expect(r.plan.baseUrl).toBe(APP);
+    expect(r.model.warnings.join("\n")).toContain(`Credentials were also recorded on ${MAPS}`);
+  });
+
+  it("with no credentials anywhere, the origin with the most endpoints still wins", () => {
+    const r = generate(
+      har([
+        entry({ url: APP + "/api/v1/orders", resBody: [{ id: 1, total: 5 }] }),
+        ...["styles", "fonts"].map((p) => entry({ url: `${MAPS}/v4/${p}`, resBody: { ok: true } })),
+      ]),
+    );
+    expect(r.plan.baseUrl).toBe(MAPS);
+  });
+
+  it("generated: the credentialed origin is baseUrl whatever the endpoint counts and auth style", SLOW, () => {
+    const rnd = rng(20_2);
+    const styles = [
+      { authorization: JWT },
+      { "x-api-key": "k_live_3f9a8b7c6d5e4f3a" },
+      { cookie: "sessionid=s3ss10nvalue77" },
+    ];
+    for (let i = 0; i < 40; i++) {
+      const app = `https://${word(rnd)}.example`;
+      const vendor = `https://${word(rnd)}.${word(rnd, 2)}.test`;
+      const hdr = pick(rnd, styles);
+      const nApp = 1 + Math.floor(rnd() * 4);
+      const nVendor = 1 + Math.floor(rnd() * 6);
+      const entries = [];
+      for (let k = 0; k < nApp; k++) entries.push(entry({ url: `${app}/api/v1/${word(rnd, 2)}s${k}`, reqHeaders: hdr, resBody: [{ id: 1, total: 5 }] }));
+      for (let k = 0; k < nVendor; k++) entries.push(entry({ url: `${vendor}/v4/${word(rnd, 2)}s${k}`, resBody: { ok: true } }));
+      const r = generateFromHar(har(entries));
+      expect(r.plan.baseUrl, JSON.stringify({ hdr, nApp, nVendor })).toBe(app);
+    }
   });
 });
