@@ -13,6 +13,9 @@
  * DJ-04: operations on another origin inherited the document-wide `security`, so a client generated from the spec
  *        sent the main token to the third party. DJ-05: GraphQL / JSON-RPC / tRPC operations on another origin had
  *        no `servers`, and replaced the API's own operation on the same path without a warning.
+ * FG-04: the default mock replayed a recorded login and token from a text body that starts with "[" or "{" but isn't
+ *        JSON (an INI file, a log line): it was read as truncated JSON, where bare words are kept.
+ * FG-05: the default mock replayed them from markup structure: tag and attribute names, `<?…?>` and `<!…>`.
  */
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -25,6 +28,8 @@ import { Validator } from "@seriousme/openapi-schema-validator";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { assertUniqueDeclarations } from "../src/codegen.js";
 import { generateFromHar } from "../src/index.js";
+import { isJsonPrefix } from "../src/leak.js";
+import { listenMock } from "../src/mock.js";
 import { ROOT, entry, har } from "./helpers.js";
 
 const O = "https://app.acme.test";
@@ -495,6 +500,85 @@ describe("DJ-04/DJ-05 operations on another origin need no credentials and never
       for (const { path, op } of ops(spec)) {
         const foreign = op.servers && op.servers[0].url !== spec.servers[0].url;
         expect(op.security, path).toEqual(foreign ? [] : undefined);
+      }
+    }
+  });
+});
+
+// ── FG-04 / FG-05 ──────────────────────────────────────────────────────────────
+
+describe("FG-04/FG-05 the default mock scrubs bracket-prefixed text and markup structure", () => {
+  const O2 = "https://api.t.test";
+  const mockTexts = async (login: string, token: string, texts: Record<string, string>, mime = "text/plain") => {
+    const me = entry({ url: `${O2}/api/me`, reqHeaders: { authorization: `Bearer ${token}` }, resBody: { login, email: "zeynep.kaya@corp.example" } });
+    const r = generateFromHar(har([me, ...Object.entries(texts).map(([k, t]) => entry({ url: `${O2}/api/t/${k}`, resMime: mime, resText: t }))]));
+    const server = await listenMock(r.model, r.exchanges, { port: 0 });
+    try {
+      const out: Record<string, string> = {};
+      for (const k of Object.keys(texts)) out[k] = await (await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/api/t/${k}`)).text();
+      return out;
+    } finally {
+      server.close();
+    }
+  };
+
+  it("the reviewer's bodies: INI, log lines, a broken brace", async () => {
+    const [login, token] = ["zkaya77", "tok_9QfZx2LmP4rT8vWc"];
+    const out = await mockTexts(login, token, {
+      ini: `[user]\nlogin = ${login}\ntoken = ${token}\n`,
+      bracketLine: `[1] ${login} logged in with ${token}`,
+      brace: `{ broken ${login} ${token}`,
+      arrayish: `[x] ${login}`,
+      logline: `[2026-11-02 10:00:00] INFO user=${login} token=${token}`,
+    });
+    for (const [k, t] of Object.entries(out)) expect([k, t.includes(login) || t.includes(token)]).toEqual([k, false]);
+  });
+
+  it("truncated JSON is still read by key; isJsonPrefix tells the two apart", () => {
+    expect(isJsonPrefix('{"login":"zkaya77","n":12,"ok":tr')).toBe(true);
+    expect(isJsonPrefix('[{"a":[1,2,null,false]},{"b":"x\\"y"')).toBe(true);
+    expect(isJsonPrefix("[user]\nlogin = zkaya77")).toBe(false);
+    expect(isJsonPrefix("{ broken zkaya77")).toBe(false);
+    expect(isJsonPrefix("[2026-11-02 10:00:00] INFO")).toBe(false);
+  });
+
+  it("the reviewer's markup: IRC-style lines, a processing instruction, entities, tag and attribute names", async () => {
+    const [login, token] = ["zkaya77", "tok_9QfZx2LmP4rT8vWc"];
+    const out = await mockTexts(
+      login,
+      token,
+      {
+        irc: `<${login}> lorem ipsum\n<bot> hi`,
+        pi: `<?xml version="1.0"?><?user ${login} ${token}?><r/>`,
+        doctype: `<!DOCTYPE r [<!ENTITY u "${login}"><!ENTITY t "${token}">]><r>&u;</r>`,
+        tagname: `<users><${login}>1</${login}></users>`,
+        attrname: `<u ${login}="1"/>`,
+      },
+      "application/xml",
+    );
+    for (const [k, t] of Object.entries(out)) expect([k, t.includes(login) || t.includes(token)]).toEqual([k, false]);
+    expect(out.pi).toMatch(/^<\?xml version="1.0"\?>/);
+    // The open and close tag get the same fake.
+    expect(out.tagname).toMatch(/^<users><([\w.-]+)>\d+<\/\1><\/users>$/);
+  });
+
+  it("generated: random logins and tokens behind random openers and in random markup positions never come back", SLOW, async () => {
+    const rnd = rng(20_6);
+    for (let i = 0; i < 10; i++) {
+      const login = word(rnd, 3) + Math.floor(10 + rnd() * 89);
+      const token = "sk_" + Array.from({ length: 20 }, () => "abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"[Math.floor(rnd() * 55)]).join("");
+      const opener = pick(rnd, ["[", "{", "[INFO] ", "{ts} ", `[${word(rnd, 2)}]\n`]);
+      const key = pick(rnd, ["user", "login", "who", "owner"]);
+      const text = await mockTexts(login, token, { a: `${opener}${key}=${login} token=${token}`, b: `${opener} ${login} ${token}` });
+      const markup = await mockTexts(
+        login,
+        token,
+        { c: pick(rnd, [`<${login}>x</${login}>`, `<r ${login}="1"/>`, `<?pi ${login} ${token}?><r/>`, `<!ENTITY e "${token}"><r/>`]) },
+        "application/xml",
+      );
+      for (const t of [...Object.values(text), ...Object.values(markup)]) {
+        expect(t.includes(login), t).toBe(false);
+        expect(t.includes(token), t).toBe(false);
       }
     }
   });

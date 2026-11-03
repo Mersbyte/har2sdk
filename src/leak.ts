@@ -1078,34 +1078,81 @@ export function csvRows(text: string): string[][] | undefined {
  * and keep everything else: tags, attribute names, keys, punctuation.
  * Returns undefined for text that is neither (plain text).
  */
-export function mapTextFields(text: string, fn: (value: string | number, key: string | undefined) => unknown): string | undefined {
+export function mapTextFields(text: string, fn: (value: string | number, key: string | undefined) => unknown, structure?: MarkupStructure): string | undefined {
   const t = text.trimStart();
-  if (t.startsWith("<") && t.includes(">")) return mapMarkup(text, fn);
-  if (t.startsWith("{") || t.startsWith("[")) return mapJsonish(text, fn);
+  if (t.startsWith("<") && t.includes(">")) return mapMarkup(text, fn, structure);
+  if (t.startsWith("{") || t.startsWith("[")) return !structure || isJsonPrefix(t) ? mapJsonish(text, fn) : undefined;
   return undefined;
+}
+
+/**
+ * How a rewriter treats markup structure. Without it (evidence collection) names and declarations are kept;
+ * the mock passes it so that a tag or attribute name holding recorded data (`<zkaya77>`) is faked like a JSON
+ * dictionary key, and a `<?…?>` / `<!…>` body is scrubbed as free text. With it, text that starts with "[" or
+ * "{" is read as truncated JSON only when it is a JSON prefix: an INI section or a log line (`[user]`,
+ * `[2026-11-02] INFO …`) is plain text and goes line by line.
+ */
+export interface MarkupStructure {
+  name(name: string): string;
+  text(text: string): string;
+}
+
+/**
+ * Is this text JSON cut off somewhere (or whole)? Strings, numbers and true / false / null with JSON
+ * punctuation, and at the end at most a cut-off literal. Linear: one pass of a regex without nested repeats.
+ */
+export function isJsonPrefix(text: string): boolean {
+  const rest = text.replace(/"(?:[^"\\]|\\.)*"?|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|\b(?:true|false|null)\b/g, " ");
+  return /^[\s{}[\]:,]*(?:t|tr|tru|f|fa|fal|fals|n|nu|nul|-)?$/.test(rest);
 }
 
 const MARKUP_TOKEN = /<!\[CDATA\[[\s\S]*?(?:\]\]>|$)|<!--[\s\S]*?(?:-->|$)|<[!?][^>]*>?|<\/?[A-Za-z][^>]*>?|[^<]+|</g;
 
-function mapMarkup(text: string, fn: (value: string | number, key: string | undefined) => unknown): string {
+/** An XML name made from a faked one: characters a name can't hold become "_", and it starts with a letter. */
+function xmlName(s: string): string {
+  const out = s.replace(/[^\w:.-]/g, "_");
+  return /^[A-Za-z_]/.test(out) ? out : "x" + out;
+}
+
+function mapMarkup(text: string, fn: (value: string | number, key: string | undefined) => unknown, structure?: MarkupStructure): string {
   const stack: string[] = [];
   const str = (v: unknown) => (typeof v === "string" ? v : String(v));
+  const rename = (n: string) => {
+    if (!structure) return n;
+    const out = structure.name(n);
+    return out === n ? n : xmlName(out);
+  };
   return text.replace(MARKUP_TOKEN, (tok) => {
     if (tok.startsWith("<![CDATA[")) {
       const inner = tok.slice(9).replace(/\]\]>$/, "");
       return `<![CDATA[${inner.trim() ? str(fn(inner, stack[stack.length - 1])) : inner}]]>`;
     }
     if (tok.startsWith("<!--")) return "<!-- -->";
-    if (tok.startsWith("<!") || tok.startsWith("<?")) return tok;
+    if (tok.startsWith("<!") || tok.startsWith("<?")) {
+      if (!structure) return tok;
+      // The XML declaration and a bare doctype are structure; any other declaration or processing
+      // instruction body (<!ENTITY u "…">, <?user …?>) is free text.
+      if (/^<\?xml(?:\s+(?:version|encoding|standalone)\s*=\s*(?:"[\w.-]*"|'[\w.-]*'))*\s*\?>$/.test(tok)) return tok;
+      const doctype = tok.match(/^<!DOCTYPE\s+([A-Za-z][\w:.-]*)\s*>$/i);
+      if (doctype) return `<!DOCTYPE ${rename(doctype[1]!)}>`;
+      const open = tok.slice(0, 2);
+      const close = tok.endsWith("?>") && open === "<?" ? "?>" : tok.endsWith(">") ? ">" : "";
+      const inner = tok.slice(2, tok.length - close.length);
+      return open + structure.text(inner).replace(/[<>]/g, "") + close;
+    }
     const tag = tok.match(/^<(\/?)([A-Za-z][\w:.-]*)/);
     if (tag) {
       const name = tag[2]!.replace(/^.*:/, "");
       if (tag[1]) {
         const at = stack.lastIndexOf(name);
         if (at >= 0) stack.length = at;
-        return tok;
+        return structure ? `</${rename(tag[2]!)}${tok.slice(2 + tag[2]!.length)}` : tok;
       }
       if (!/\/>$/.test(tok) && !/^(br|hr|img|input|meta|link|area|base|col|embed|source|track|wbr)$/i.test(name)) stack.push(name);
+      if (structure) {
+        const renamed = rename(tag[2]!);
+        if (renamed !== tag[2]) tok = `<${renamed}${tok.slice(1 + tag[2]!.length)}`;
+      }
       // Attribute values; namespace declarations are structure.
       // An attribute starts after white space: anchoring there keeps this linear on a
       // tag with a huge run of name characters (no backtracking from every position).
@@ -1113,7 +1160,7 @@ function mapMarkup(text: string, fn: (value: string | number, key: string | unde
       return tok.replace(/(\s)([\w:.-]+)(\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+?)(?=\s|\/?>|$))/g, (m, lead: string, attr: string, eq: string, dq?: string, sq?: string, bare?: string) => {
         if (/^xmlns(:|$)/.test(attr)) return m;
         const out = str(fn(decodeEntities(dq ?? sq ?? bare ?? ""), attr.replace(/^.*:/, ""))).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
-        return `${lead}${attr}${eq}"${out}"`;
+        return `${lead}${rename(attr)}${eq}"${out}"`;
       });
     }
     if (tok === "<" || !tok.trim()) return tok;
