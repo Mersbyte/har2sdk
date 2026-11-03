@@ -2,7 +2,7 @@
 
 ## 0.6.17
 
-Fixes from a twenty-first review (a security pass by another AI assistant against the published 0.6.16) and a twenty-second (the MCP server as a model drives it). Eight findings fixed, each reproduced with the reviewer's input before it was fixed. Tests are in `test/review21.test.ts` and `test/review22.test.ts`, with generated variants. `test/fixtures/demo-snapshot.json` is unchanged.
+Fixes from a twenty-first review (a security pass by another AI assistant against the published 0.6.16), a twenty-second (the MCP server as a model drives it) and a twenty-third (an independent test conversation's list of fourteen items). Eight security findings and the twenty-third review's items are fixed, each reproduced with the reviewer's input before it was fixed. Tests are in `test/review21.test.ts`, `test/review22.test.ts` and `test/review23.test.ts`, with generated variants. `test/fixtures/demo-snapshot.json` is unchanged.
 
 **Security**
 - MCP `generate_sdk` accepted any `base_url`. The client sends the user's token to its base URL, and text in a capture can steer a model, so a crafted capture could have a model point the client at another site. `base_url` must now be one of the capture's origins (any path on it) or a localhost URL, without a user name or password; another address is the user's call (`--base-url`, or `baseUrl` in code) (K1).
@@ -13,7 +13,18 @@ Fixes from a twenty-first review (a security pass by another AI assistant agains
 - (Review 22.) MCP `generate_sdk` had an `allow_leaks` parameter, so a model could write files the leak guard refused. It is removed, and the refusal no longer mentions an override. The CLI's `--allow-leaks` stays: there the user types it (M3).
 - A base URL with a user name or password (`--base-url https://u:p@host`, or `baseUrl` in the library) was written into `client.ts`, a file people commit. It is refused now, without echoing it back; pass credentials to the client at run time (K5).
 
+- (Review 23.) A crafted capture can make an attacker's origin the client's default address (by sending it credentials). Which origin was chosen and why was one warning among others; it is now `primaryOriginWarning`: the first field of MCP `analyze_har` (and in `generate_sdk`), a field of `inspect --json`, and the last line the CLI prints after generating (unless `--base-url` was given) (B7).
+- (Review 23.) `clientName: "then"` made the module a thenable, and `arguments`, `eval` or a TypeScript type name (`string`, `number`…) broke it; a type renamed to `string` broke `client.ts`, and to `enc` made the run fail. Such client and type names are now refused with a warning and the generated name kept (B8, B9).
+
+**Correctness** (review 23)
+- An empty list or object merged with any type of the same shape: `{"mode":[]}` and `{"mode":3.14}` became one type with `mode: number`. An empty list now stands only for a list, an empty object only for an object; a value never seen still fits anything (A1).
+- Short ids of one family (`item-1` / `item-4`, `ord_1` / `ord_2`, `abc-1`…`abc-3`) stayed separate literal endpoints. The same letters, the same separator and only the number differing make a parameter now, if the payloads look alike; without a separator (`step1`, `step2`) it takes three values. `/users/me` and `/users/list` stay apart (A2).
+- A recorded key named `$ref` (or `$dynamicRef`, `$recursiveRef`) was written as a property, which openapi-schema-validator reads as a reference and rejects. Such a key is now described with an exact `patternProperties` entry (`^\$ref$`), and stays in `required` (A3).
+- An optional property named after an `Object` member (`toString`, `constructor`, `valueOf`…) rejected a recorded object without it, which still inherits that member. Its type now allows the inherited one (`toString?: number | Object["toString"]`) (A4).
+- The mock hung on a recorded 1xx status (an interim response with no final one) and could send 0. Statuses outside 200–599 are answered as 200 now. `mock --port 0` printed port 0; it prints the port it got (A5).
+
 **Docs**
+- (Review 23.) README: a 2xx response whose JSON doesn't parse is returned as raw text, not thrown (A6, documented rather than changed: throwing would break servers that label text as JSON); what a model sees, in line with SECURITY.md (C11); the performance table is an example on one machine (C12). docs/LAUNCH.md is for 0.6.17 (C10). SECURITY.md's annotation limit now says what is refused, and the mock-status limit is gone (fixed).
 - SECURITY.md lists three more limits: annotations that rename a type to a built-in or helper name; the mock with recorded 1xx and 0 statuses; and what a model sees over MCP (review 22).
 
 **Not changed** (from the same review): a path value with no evidence (`/@user` never named elsewhere, an IP address, a short-link code) stays a literal, and is listed in the path-words list (the documented limit).

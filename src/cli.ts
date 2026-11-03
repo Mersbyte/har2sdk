@@ -158,6 +158,7 @@ async function main(argv: string[]): Promise<number> {
             source,
             stats: model.stats,
             origins: model.origins,
+            ...(model.primaryOriginWarning ? { primaryOriginWarning: model.primaryOriginWarning } : {}),
             auth: model.auth,
             defaultHeaders: model.defaultHeaders,
             warnings: plan.warnings,
@@ -179,6 +180,7 @@ async function main(argv: string[]): Promise<number> {
       );
     } else {
       printOverview(plan, source);
+      if (model.primaryOriginWarning) console.log(`\n  ${c.yellow("!")} ${c.bold(stripControl(scrubText(model.primaryOriginWarning, model.taint)))}`);
       // The same notes `generate` prints (an unmatched --param, dropped telemetry…).
       if (plan.warnings.length) console.log("");
       printWarnings(plan.warnings, model.taint);
@@ -200,9 +202,9 @@ async function main(argv: string[]): Promise<number> {
   }
 
   if (command === "mock") {
-    const port = Number(values.port ?? 4010);
+    let port = Number(values.port ?? 4010);
     const bind = values.bind ?? "127.0.0.1";
-    await listenMock(model, exchanges, {
+    const server = await listenMock(model, exchanges, {
       port,
       host: bind,
       raw: values.raw,
@@ -213,6 +215,9 @@ async function main(argv: string[]): Promise<number> {
       onRequest: ({ method, path, status, endpoint }) =>
         console.log(`${methodColor(method)} ${pad(path, 48)} ${status < 400 ? c.green(String(status)) : c.red(String(status))} ${c.dim(endpoint ?? "no match")}`),
     });
+    // With --port 0 the system picks the port: print the one it picked.
+    const address = server.address();
+    if (address && typeof address === "object") port = address.port;
     console.log(`${c.bold("har2sdk mock")} replaying ${model.endpoints.length} endpoints from ${source}`);
     console.log(`  ${c.cyan(`http://localhost:${port}`)}   ${c.dim(`new ${clientNameFor(model, ann)}({ baseUrl: "http://localhost:${port}" })`)}`);
     if (bind !== "127.0.0.1" && bind !== "localhost") {
@@ -262,6 +267,8 @@ async function main(argv: string[]): Promise<number> {
   }
   printWarnings(result.warnings, model.taint);
   printPathWords(renderPathWords(result.plan, literalPathWords(result.plan, exchanges), { limit: 20, show: visibleWord }), model.taint);
+  // Last, where it is read: which origin gets the user's credentials (unless they chose it with --base-url).
+  if (model.primaryOriginWarning && values["base-url"] === undefined) console.log(`\n  ${c.yellow("!")} ${c.bold(stripControl(scrubText(model.primaryOriginWarning, model.taint)))}`);
   const rel = relative(process.cwd(), outDir) || ".";
   const label = (s: string) => pad(c.bold(s), 14);
   console.log(`

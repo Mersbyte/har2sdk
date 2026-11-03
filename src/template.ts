@@ -540,6 +540,14 @@ function shouldMerge(group: Entry[], i: number): boolean | "locale" {
   // `/users/alice` → `{"login": "alice"}` is strong evidence of an identifier.
   const echoed = group.filter((e) => e.echoed.has((e.tokens[i] as string).toLowerCase())).length;
 
+  // Short ids of one family (`item-1` / `item-4`, `ord_1` / `ord_2`): the same prefix and only the number differs.
+  // With a separator two values are enough; without one (`step1`, `step2`) it takes three. The payloads must
+  // still look alike, as for other opaque values.
+  const family = literals.map((l) => /^([A-Za-z][A-Za-z]*)([-_.]?)(\d{1,6})$/.exec(l));
+  if (family.every((m) => m && m[1]!.toLowerCase() === family[0]![1]!.toLowerCase() && m[2] === family[0]![2])) {
+    if (family[0]![2] || n >= 3) return sim === undefined || sim >= 0.5;
+  }
+
   // Words (any case: "users", "getUserInfo", "s3-presigned-upload") are names
   // of resources, actions or sub-collections. Merge them only when the server
   // echoes each one back as an identifier and the payloads match.

@@ -148,8 +148,11 @@ export function createMockServer(model: ApiModel, exchanges: Exchange[], opts: M
     } else if (rb?.kind === "text" || rb?.kind === "unparsed") {
       payload = redact ? scrubTextBody(rb.raw, scrubber, model.taint) : rb.raw;
     }
-    send(res, sample.status || 200, contentType, payload);
-    opts.onRequest?.({ method, path: url.pathname + url.search, status: sample.status, endpoint: match.ep.id });
+    // A recorded 1xx is an interim response (Node would send it and never finish), 0 is a request the browser
+    // never completed, and anything outside 100–599 isn't a status: such samples are answered as 200.
+    const status = sample.status >= 200 && sample.status <= 599 ? sample.status : 200;
+    send(res, status, contentType, payload);
+    opts.onRequest?.({ method, path: url.pathname + url.search, status, endpoint: match.ep.id });
   };
 
   return createServer((req, res) => {

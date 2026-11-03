@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import { generateFromHar, HarError, loadHar } from "../src/index.js";
 import { ROOT, entry, har } from "./helpers.js";
 
+// Made-up values in the shape of real keys (the guard is tested on that shape); they belong to no account.
 const API_KEY = "AIzaSyD-9tSrke72PouQMnMX-a7eZSW0jkFMBWY";
 const SECRET_HEADER = "sk_live_51Hx9aKJ2eZvKYlo2C8f3kQ";
 
