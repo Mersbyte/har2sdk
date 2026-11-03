@@ -18,7 +18,7 @@
 npx har2sdk capture.har
 ```
 
-Figuring out an undocumented API in DevTools → Network takes an afternoon: which endpoints exist, what the ids look like, which fields are optional, what auth it wants. har2sdk does it in one command for JSON APIs — REST, GraphQL, JSON-RPC and tRPC — **entirely on your machine: it makes no network requests and never sends your capture anywhere** (the optional [naming step with Claude](#better-names-with-claude--no-api-key) sees endpoints and types, with the recorded values the leak guard knows replaced by `<redacted>`). It gives you a client you can import:
+Figuring out an undocumented API in DevTools → Network takes an afternoon: which endpoints exist, what the ids look like, which fields are optional, what auth it wants. har2sdk does it in one command for JSON APIs — REST, GraphQL, JSON-RPC and tRPC — **on your machine: har2sdk itself makes no network requests and doesn't upload your capture** (`npx` downloads the package itself, and the optional [naming step with Claude](#better-names-with-claude--no-api-key) sees endpoints and types, with the recorded values the leak guard knows replaced by `<redacted>`). It gives you a client you can import:
 
 ```ts
 import { AcmeShopClient } from "./har2sdk-out/client.js";
@@ -123,6 +123,8 @@ HAR files contain live session cookies, tokens and often other people's data. ha
 Exit status 0 means the guard found nothing it could match, not that nothing leaked. A value with **no evidence** in the parts of the capture the guard reads (a word used once as a path segment that nothing else names) can't be recognised, one-word names of things (a category `"Books"`) are treated as vocabulary, and a value the app rewrites in a way the guard doesn't model (see [Limitations](#limitations)) is missed. So that you can judge such words yourself, the CLI (after the files it wrote), `har2sdk inspect` (and `inspect --json`, as `pathWords`) and the MCP `analyze_har` and `generate_sdk` responses list every path word written into `client.ts`, the ones seen in only one recorded path first; check that list before publishing generated code, and make a word that is data a parameter with `--param`. **Check `har2sdk inspect` and the generated files yourself before committing or publishing them.** Details, and exactly what is and isn't collected: [SECURITY.md](SECURITY.md).
 
 It's tested with the inputs of twenty review rounds (`test/review*.test.ts`) and a generated privacy test that builds a random person and hides them in 30 kinds of places in a random capture, then checks every output, including a real MCP session, the CLI's `inspect --json` and every mock response (30 seeds in CI; the long run of 1,000 seeds passes).
+
+**How it was built and checked.** har2sdk was written with an AI coding assistant (Claude), and every review so far was done by AI tools (Claude Code, OpenAI Codex) and GitHub's CodeQL scanner. It has not had an independent audit by a security professional. Each review found real problems, and later ones still did, so treat the leak guard as a safety net that lowers the risk, not as a guarantee, and please [report](SECURITY.md#reporting-a-problem) anything it misses.
 
 **Treat `.har` files like passwords.** **Use it responsibly:** reverse-engineering an API you don't own can break its terms of use. Good uses: your own apps, legacy internal systems, services you're allowed to integrate with. Please don't publish SDKs for other companies' services.
 

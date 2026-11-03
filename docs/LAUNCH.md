@@ -129,7 +129,7 @@ These are common conventions, not measurements:
 > It reads traffic your own browser already sent and received, and it's meant for your own apps, legacy internal systems and services you're allowed to integrate with. Reverse-engineering or automating an API you don't own can break its terms of use; whether that's allowed depends on those terms and where you are. The README asks people not to publish SDKs for other companies' services. (Not legal advice.)
 
 **"HAR files contain my session. Why would I feed one to a tool?"**
-> It runs on your machine and the CLI makes no network requests. Recorded values are kept out of `client.ts` and `openapi.json`; if the leak guard finds one, nothing is written. The mock serves fake data unless you pass `--raw`. Still: treat the HAR like a password and don't commit it.
+> It runs on your machine and the CLI makes no network requests. The leak guard keeps the recorded values it can match out of `client.ts` and `openapi.json`; if it finds one, nothing is written. It's a heuristic, written and reviewed with AI tools, with no independent audit yet. The mock serves fake data unless you pass `--raw`. Still: treat the HAR like a password and don't commit it.
 
 **"Can I trust the leak guard?"**
 > Trust it as a heuristic with evidence from the capture, not as a guarantee. It can't recognise a value that nothing in the capture marks as data, and one-word names of things are treated as vocabulary. That's documented in SECURITY.md, which also lists exactly what is collected. Look over `har2sdk inspect` before publishing generated code, and please report leaks (SECURITY.md says how).

@@ -6,7 +6,7 @@ If you find a way for recorded data (cookies, tokens, personal data) to end up i
 
 ## What har2sdk does to protect recorded data
 
-The leak guard below is a heuristic. It links outputs back to the capture by matching recorded values (and a few forms of them) against the text it generates; it is not a proof that nothing leaked. A clean run means it found nothing it could match. Check `har2sdk inspect` and the generated files before committing or publishing them.
+The leak guard below is a heuristic. It links outputs back to the capture by matching recorded values (and a few forms of them) against the text it generates; it is not a proof that nothing leaked. The code and its reviews so far are AI-assisted (Claude Code, Codex, CodeQL); there has been no independent professional audit. A clean run means it found nothing it could match. Check `har2sdk inspect` and the generated files before committing or publishing them.
 
 - The CLI and library make no network requests.
 - **Leak guard.** Before generating anything, har2sdk collects
