@@ -204,8 +204,9 @@ export function templatePaths(samples: PathSample[], opts: TemplateOptions = {})
       // A personal value (a username, a name) right after a collection counts too: /users/mdemir/repos.
       // Vocabulary that also shows up in a body ("oauth2", "ipv4") is not enough: the
       // segment must be id-shaped, or name a user/tenant right after a collection.
-      // A one-word name counts as a user's name after a collection of people (/users/oguz).
-      const named = isIdentity(opts.taint, seg) || (!!prevSeg && personWord(prevSeg) && !!opts.taint?.labels.has(lower));
+      // A one-word name counts as a user's name after a collection of people (/users/oguz): a thing's name
+      // (a label) or a person's own (`name`, `displayName`, `first_name` of a profile, kept as a recorded value).
+      const named = isIdentity(opts.taint, seg) || (!!prevSeg && personWord(prevSeg) && (!!opts.taint?.labels.has(lower) || !!opts.taint?.values.has(lower)));
       if (opts.taint && isTainted(opts.taint, seg) && (isIdShaped(seg) || (prevSeg && (isPlural(prevSeg) || personWord(prevSeg)) && named && !COMMON_SUBPATHS.has(lower)))) return null;
       // Strong tenant prefixes (/orgs/acme/repos, /t/acme-corp/projects): the
       // next segment names a tenant, unless it's a sub-collection or a keyword.

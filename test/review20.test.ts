@@ -16,6 +16,8 @@
  * FG-04: the default mock replayed a recorded login and token from a text body that starts with "[" or "{" but isn't
  *        JSON (an INI file, a log line): it was read as truncated JSON, where bare words are kept.
  * FG-05: the default mock replayed them from markup structure: tag and attribute names, `<?…?>` and `<!…>`.
+ * A1-04: a person's one-word name (under `name`, `displayName`, `first_name`…) used after a people collection
+ *        (`/users/dorukbey`) stayed a literal, so every such app was refused (exit 2); `username` worked.
  */
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -580,6 +582,53 @@ describe("FG-04/FG-05 the default mock scrubs bracket-prefixed text and markup s
         expect(t.includes(login), t).toBe(false);
         expect(t.includes(token), t).toBe(false);
       }
+    }
+  });
+});
+
+// ── A1-04 ──────────────────────────────────────────────────────────────────────
+
+describe("A1-04 a person's one-word name after a people collection is a path parameter, not a refusal", () => {
+  const capture = (host: string, key: string, v: string, path: string) =>
+    har([
+      entry({ url: `${host}/api/v1/me`, resBody: { id: 7, [key]: v, email: "x7@posta.example" } }),
+      entry({ url: `${host}/api/v1/orders`, resBody: [{ id: 1, status: "shipped" }] }),
+      entry({ url: `${host}${path}`, resBody: { bio: "hi there", followers: 3 } }),
+    ]);
+
+  it("the reviewer's capture: /users/dorukbey and /profiles/dorukbey/posts, for each name key", () => {
+    for (const key of ["name", "displayName", "screen_name", "first_name", "fullName", "username"]) {
+      for (const [path, tpl] of [
+        ["/api/v1/users/dorukbey", "/api/v1/users/{userId}"],
+        ["/api/v1/profiles/dorukbey/posts", "/api/v1/profiles/{profileId}/posts"],
+      ]) {
+        const r = generateFromHar(capture("https://api.t.test", key, "dorukbey", path!));
+        expect(r.leaks, `${key} ${path}`).toEqual([]);
+        expect(r.model.endpoints.map((e) => e.path)).toContain(tpl);
+        for (const f of Object.values(r.files)) expect(f.toLowerCase()).not.toContain("dorukbey");
+      }
+    }
+  });
+
+  it("a plain word after a people collection with no evidence is unchanged (stays a literal)", () => {
+    const r = generateFromHar(
+      har([
+        entry({ url: "https://api.t.test/api/v1/me", resBody: { id: 7, name: "dorukbey", email: "x7@posta.example" } }),
+        entry({ url: "https://api.t.test/api/v1/users/search", resBody: [{ id: 1 }] }),
+      ]),
+    );
+    expect(r.model.endpoints.map((e) => e.path)).toContain("/api/v1/users/search");
+  });
+
+  it("generated: random names, name keys in five languages and people paths are templated, never refused or written", SLOW, () => {
+    const rnd = rng(20_7);
+    const keys = ["name", "displayName", "display_name", "screen_name", "fullName", "first_name", "givenName", "vorname", "isim", "nombre", "realName"];
+    const paths = [(v: string) => `/api/v1/users/${v}`, (v: string) => `/api/people/${v}`, (v: string) => `/api/v1/profiles/${v}/posts`, (v: string) => `/api/v2/members/${v}`];
+    for (let i = 0; i < 30; i++) {
+      const v = word(rnd, 3) + pick(rnd, ["", "n", "r", "l"]);
+      const r = generateFromHar(capture(`https://api${i}.example`, pick(rnd, keys), v, pick(rnd, paths)(v)));
+      expect(r.leaks, v).toEqual([]);
+      for (const f of Object.values(r.files)) expect(f.toLowerCase().includes(v), v).toBe(false);
     }
   });
 });
