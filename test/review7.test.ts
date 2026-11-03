@@ -283,7 +283,8 @@ describe("E6 the security guarantees that had no test", () => {
     expect(existsSync(join(dir, "out", "openapi.json"))).toBe(false);
   });
 
-  it("MCP generate_sdk refuses to write when the leak guard finds a value, unless allow_leaks", async () => {
+  // Since 0.6.17 (review 22, M3) MCP has no allow_leaks: a model must not override the guard. The CLI's --allow-leaks stays.
+  it("MCP generate_sdk refuses to write when the leak guard finds a value, with no override", async () => {
     const dir = tmp("leak");
     // An email in a GraphQL comment stays in the document: the guard refuses it.
     writeFileSync(join(dir, "c.har"), har([entry({ method: "POST", url: O + "/graphql", reqBody: { query: "# asked by zeynep.ak@posteo.de\nquery Dash { dash { id } }" }, resBody: { data: { dash: { id: 1 } } } })]));
@@ -295,8 +296,8 @@ describe("E6 the security guarantees that had no test", () => {
     expect(existsSync(join(dir, "out", "client.ts"))).toBe(false);
     const allowed = await call("generate_sdk", { har_path: join(dir, "c.har"), out_dir: join(dir, "out"), allow_leaks: true });
     await close();
-    expect(allowed.isError).toBe(false);
-    expect(existsSync(join(dir, "out", "client.ts"))).toBe(true);
+    expect(allowed.isError).toBe(true);
+    expect(existsSync(join(dir, "out", "client.ts"))).toBe(false);
   });
 
   it("listenMock binds to 127.0.0.1 by default", async () => {
@@ -363,7 +364,7 @@ describe("E7 the numbers in README and LAUNCH.md match the repo", () => {
   // The sites, plus the three places every capture has: the profile, the members list and the headers.
   const kinds = [...sites.matchAll(/^ {4}[a-zA-Z]+: \(\) => \{/gm)].length + 3;
   const rounds = readdirSync(join(ROOT, "test")).filter((f) => /^review\d*\.test\.ts$/.test(f)).length;
-  const words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty", "twenty-one"];
+  const words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty", "twenty-one", "twenty-two"];
 
   for (const file of ["README.md", "docs/LAUNCH.md"]) {
     it(file, () => {

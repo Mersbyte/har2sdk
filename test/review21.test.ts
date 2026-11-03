@@ -79,11 +79,14 @@ describe("K1 MCP base_url must be a recorded origin or localhost", () => {
     const { path, out } = setup();
     const res = await call("generate_sdk", { har_path: path, out_dir: out, base_url: "https://collect.attacker.example" });
     expect(res.isError).toBe(true);
-    expect(res.text).toMatch(/one of the capture's origins or a localhost URL/);
+    expect(res.text).toMatch(/own API origin .* or a localhost URL/);
   });
 
-  it("a recorded origin (with a path), a third party in the capture, and localhost are accepted", async () => {
-    for (const base of [`${O}/api`, THIRD, "http://localhost:4010", "http://127.0.0.1:8080/v1"]) {
+  // Since review 22 (M1) a third party in the capture is refused too: only the API's own origin and localhost.
+  it("the API's origin (with a path) and localhost are accepted; a third party in the capture isn't", async () => {
+    const third = setup();
+    expect((await call("generate_sdk", { har_path: third.path, out_dir: third.out, base_url: THIRD })).isError).toBe(true);
+    for (const base of [`${O}/api`, "http://localhost:4010", "http://127.0.0.1:8080/v1"]) {
       const { path, out } = setup();
       const res = await call("generate_sdk", { har_path: path, out_dir: out, base_url: base });
       expect(res.isError, base).toBe(false);

@@ -64,7 +64,8 @@ async function load(harPath: string, hosts?: string[]): Promise<{ model: ApiMode
 
 /**
  * The base URL is where the generated client sends the user's token. Over MCP a model picks it, and text in
- * the capture can steer a model, so only an origin the capture talked to or a local address is accepted.
+ * the capture can steer a model (a crafted capture can also "call" an attacker's site), so only the capture's
+ * own API origin (the one that got credentials) or a local address is accepted.
  * Any other URL is the user's call: the CLI's `--base-url`, or the client's `baseUrl` option.
  */
 export function mcpBaseUrlProblem(baseUrl: string, recorded: readonly string[]): string | undefined {
@@ -78,7 +79,7 @@ export function mcpBaseUrlProblem(baseUrl: string, recorded: readonly string[]):
   if (url.username || url.password) return `base_url must not contain a user name or password.`;
   const local = /^(localhost|127\.0\.0\.1|\[::1\])$/i.test(url.hostname);
   if (local || recorded.includes(url.origin)) return undefined;
-  return `base_url must be one of the capture's origins or a localhost URL: the client sends credentials there. For another address, run \`har2sdk <capture.har> --base-url <url>\` yourself, or pass \`baseUrl\` when you create the client.`;
+  return `base_url must be the capture's own API origin (${recorded.join(", ") || "none"}) or a localhost URL: the client sends credentials there. For another address or host, the user can run \`har2sdk <capture.har> --base-url <url>\` or \`--host <host>\` in the CLI, or pass \`baseUrl\` when creating the client.`;
 }
 
 /** The annotations already in out_dir: none if there's no file, an error if the file can't be read as annotations. */
@@ -242,14 +243,13 @@ export function createMcpServer(): McpServer {
         base_url: z
           .string()
           .optional()
-          .describe("Override the base URL baked into the SDK: one of the capture's origins (another path on it is fine) or a localhost URL. The client sends credentials to it."),
-        allow_leaks: z.boolean().optional().describe("Write the files even if the leak guard finds recorded values in them (only when the user confirms it's a false positive)"),
+          .describe("Override the base URL baked into the SDK: the capture's own API origin (another path on it is fine) or a localhost URL. The client sends credentials to it."),
         hosts,
         annotations: annotationSchema,
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async ({ har_path, out_dir, base_url, hosts, annotations, allow_leaks }) => {
+    async ({ har_path, out_dir, base_url, hosts, annotations }) => {
       try {
         const { model, exchanges, path } = await load(har_path, hosts);
         // No endpoint (a typo in `hosts`, a capture without API calls): fail before writing, as analyze_har does,
@@ -289,13 +289,21 @@ export function createMcpServer(): McpServer {
           const existingAnn = await readAnnotations(annFile);
           if (!existingAnn.ok) return fail(scrubText(`${annFile} exists but ${existingAnn.error}; nothing was written. Fix or move that file, then call generate_sdk again.`, model.taint));
           const merged = mergeAnnotations(existingAnn.value, annotations as Annotations | undefined);
-          if (base_url !== undefined) {
-            const why = mcpBaseUrlProblem(base_url, model.origins.map((o) => o.origin));
-            if (why) return fail(why);
-          }
+          // The client's address comes from the whole capture, not from what `hosts` kept: the API origin the
+          // app sent its credentials to. A model can only keep it or point the client at localhost.
+          const anchor = hosts?.length ? (await load(har_path)).model.primaryOrigin : model.primaryOrigin;
+          const why = mcpBaseUrlProblem(base_url ?? model.primaryOrigin, [anchor]);
+          if (why) return fail(base_url === undefined ? why.replace("base_url", "With these hosts, the client's address") : why);
           const result = generateFromModel(model, exchanges, { annotations: merged, baseUrl: base_url, source: model.source });
-          if (result.leaks.length && !allow_leaks) {
-            return fail(scrubText(`Nothing written: ${result.warnings.find((w) => w.startsWith("Leak guard")) ?? "the leak guard found recorded values."}`, model.taint));
+          if (result.leaks.length) {
+            // Over MCP there is no override: a model must not decide that a recorded value may be written.
+            const found = result.warnings.find((w) => w.startsWith("Leak guard"))?.replace(/ The CLI refuses[^.]*\./, "") ?? "Leak guard: recorded values found in the output.";
+            return fail(
+              scrubText(
+                `Nothing written. ${found} Make such a value a parameter (annotations: params) or leave its endpoint out (hosts), or tell the user which endpoint it is so they can check it.`,
+                model.taint,
+              ),
+            );
           }
           const files = { ...result.files, "har2sdk.annotations.json": JSON.stringify(merged, null, 2) + "\n" };
           const written = await writeFiles(outDir, files);
