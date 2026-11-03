@@ -13,7 +13,7 @@ import { analyzeExchanges, type ApiModel } from "./model.js";
 import { loadHarFile, mergeExchanges } from "./har.js";
 import { buildPlan, checkBaseUrl, type Plan } from "./plan.js";
 import { authSummary, renderChatPrompt } from "./summary.js";
-import { scrubText } from "./leak.js";
+import { scrubText, type Taint } from "./leak.js";
 import { literalPathWords, renderPathWords, visibleWord } from "./pathwords.js";
 import { c, guardTerminal, kb, methodColor, pad, stripControl } from "./term.js";
 
@@ -178,8 +178,8 @@ async function main(argv: string[]): Promise<number> {
       printOverview(plan, source);
       // The same notes `generate` prints (an unmatched --param, dropped telemetry…).
       if (plan.warnings.length) console.log("");
-      for (const w of plan.warnings) console.log(`  ${c.yellow("!")} ${w}`);
-      printPathWords(renderPathWords(plan, literalPathWords(plan, exchanges), { show: visibleWord, counts: true }));
+      printWarnings(plan.warnings, model.taint);
+      printPathWords(renderPathWords(plan, literalPathWords(plan, exchanges), { show: visibleWord, counts: true }), model.taint);
     }
     return 0;
   }
@@ -226,7 +226,7 @@ async function main(argv: string[]): Promise<number> {
   });
   printOverview(result.plan, source);
   if (result.leaks.length && !values["allow-leaks"]) {
-    for (const w of result.warnings) console.log(`  ${c.yellow("!")} ${w}`);
+    printWarnings(result.warnings, model.taint);
     console.error(
       c.red(`\n✗ The leak guard found ${result.leaks.length} recorded value${result.leaks.length === 1 ? "" : "s"} in the output; nothing was written.`) +
         c.dim(`\n  Fix it with --param / --exclude-path / annotations, or pass --allow-leaks if you're sure (and please report a false positive).`),
@@ -252,8 +252,8 @@ async function main(argv: string[]): Promise<number> {
         : c.dim("OpenAPI 3.1");
     console.log(`  ${c.green("✓")} ${pad(relative(process.cwd(), file) || file, 34)} ${pad(kb(size), 9)} ${extra}`);
   }
-  for (const w of result.warnings) console.log(`  ${c.yellow("!")} ${w}`);
-  printPathWords(renderPathWords(result.plan, literalPathWords(result.plan, exchanges), { limit: 20, show: visibleWord }));
+  printWarnings(result.warnings, model.taint);
+  printPathWords(renderPathWords(result.plan, literalPathWords(result.plan, exchanges), { limit: 20, show: visibleWord }), model.taint);
   const rel = relative(process.cwd(), outDir) || ".";
   const label = (s: string) => pad(c.bold(s), 14);
   console.log(`
@@ -297,16 +297,23 @@ function printOverview(plan: Plan, source: string): void {
   for (const op of plan.ops) {
     const path = op.ep.graphql ? `${op.ep.path} ${c.magenta(op.ep.graphql.operationName)}` : highlightParams(op.ep.path);
     const host = op.foreignOrigin ? c.dim(new URL(op.foreignOrigin).host) : "";
-    console.log(`  ${methodColor(op.ep.method)} ${host}${pad(path, width)} ${pad(c.cyan(op.ep.name), 28)} ${c.dim("×" + op.ep.count)}`);
+    // Redacted like `inspect --json`: a refused run's overview would otherwise print the very value it refused.
+    console.log(scrubText(`  ${methodColor(op.ep.method)} ${host}${pad(path, width)} ${pad(c.cyan(op.ep.name), 28)} ${c.dim("×" + op.ep.count)}`, model.taint));
   }
 }
 
+/** A warning line, redacted like `inspect --json` (a dropped request's path can hold a known username). */
+function printWarnings(warnings: readonly string[], taint: Taint): void {
+  for (const w of warnings) console.log(scrubText(`  ${c.yellow("!")} ${w}`, taint));
+}
+
 /** The path-word section (see pathwords.ts); its words are already escaped by {@link visibleWord}. */
-function printPathWords(lines: string[]): void {
+function printPathWords(lines: string[], taint: Taint): void {
   if (!lines.length) return;
   const [head, ...rest] = lines;
   console.log(`\n  ${c.bold(head!)}`);
-  for (const l of rest) console.log(`  ${l.startsWith("  A word") ? c.dim(l) : l}`);
+  // Words the guard knows are redacted; the others (the ones the user must judge) are shown as they are.
+  for (const l of rest) console.log(scrubText(`  ${l.startsWith("  A word") ? c.dim(l) : l}`, taint));
 }
 
 function highlightParams(path: string): string {

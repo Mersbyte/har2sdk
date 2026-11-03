@@ -31,6 +31,8 @@
  * E-04: MCP `generate_sdk` with no matching endpoint (a typo in `hosts`) replaced a working client.ts with an
  *        empty one and reported success.
  * H-04: reading `<meta name=… content=…>` pairs was quadratic on unclosed tags: seconds per 200 KB HTML body.
+ * A1-01: a refused run's overview (exit 2), plain `inspect` and the CLI's warnings printed the value the guard knew
+ *        (a dropped request's path, a literal path segment), next to "please report it".
  */
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -51,6 +53,7 @@ import { listenMock } from "../src/mock.js";
 import { ROOT, entry, har } from "./helpers.js";
 
 const O = "https://app.acme.test";
+const CLI = join(ROOT, "dist/cli.js");
 const THIRD = "https://rates.thirdparty.test";
 const SLOW = { timeout: 120_000 };
 
@@ -899,6 +902,44 @@ describe("H-04 named values in markup are read in linear time, with the same res
       let m = "";
       for (let j = 0; j < 40; j++) m += pick(rnd, parts);
       expect(namedValues(m), m).toEqual(reference(m));
+    }
+  });
+});
+
+// ── A1-01 ──────────────────────────────────────────────────────────────────────
+
+describe("A1-01 the CLI never prints a value the leak guard knows", () => {
+  const API = "https://api.shop.example";
+  const run = (capture: string, inspect: boolean) => {
+    const dir = tmp();
+    writeFileSync(join(dir, "cap.har"), capture);
+    const args = inspect ? ["inspect", join(dir, "cap.har")] : [join(dir, "cap.har"), "-o", join(dir, "out")];
+    const r = spawnSync(process.execPath, [CLI, ...args], { encoding: "utf8", env: { ...process.env, NO_COLOR: "1" } });
+    return { status: r.status, out: r.stdout + r.stderr };
+  };
+  const capture = (u: string) =>
+    har([
+      entry({ url: `${API}/api/v1/me`, resBody: { username: u, email: `${u}@posta.example` } }),
+      entry({ url: `${API}/api/v1/orders`, resBody: [{ id: 1, status: "shipped" }] }),
+      entry({ url: `${API}/${u}/posts`, resBody: [{ id: 1 }] }),
+      entry({ method: "POST", url: `${API}/rum/${u}`, reqBody: { t: 1 }, resBody: { ok: true } }),
+    ]);
+
+  it("the reviewer's capture: a refused run and plain inspect show <redacted>", SLOW, () => {
+    const gen = run(capture("dorukbey"), false);
+    expect(gen.status).toBe(2);
+    expect(gen.out).not.toMatch(/dorukbey/i);
+    expect(gen.out).toContain("<redacted>");
+    const ins = run(capture("dorukbey"), true);
+    expect(ins.status).toBe(0);
+    expect(ins.out).not.toMatch(/dorukbey/i);
+  });
+
+  it("generated: random usernames never reach the CLI output", SLOW, () => {
+    const rnd = rng(20_13);
+    for (let i = 0; i < 4; i++) {
+      const u = word(rnd, 3) + pick(rnd, ["", "x", "42"]);
+      for (const inspect of [false, true]) expect(run(capture(u), inspect).out.toLowerCase().includes(u), u).toBe(false);
     }
   });
 });
