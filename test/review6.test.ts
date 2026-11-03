@@ -158,7 +158,8 @@ describe("A1 MCP generate_sdk never writes through a symbolic link", () => {
 describe("A2 readable outputs redact every form the scanner finds", () => {
   const cases: [string, Entry[]][] = [
     ["a bucket named after the person", [me(), entry({ url: "https://zeynep-ak.s3.amazonaws.com/manifest.json", resBody: { files: [{ key: "a", size: 1 }] } })]],
-    ["a profile slug in a path", [me(), entry({ url: O + "/api/u/zeynep-ak/settings", reqHeaders: H, resBody: { theme: "dark" } })]],
+    // (A slug in its own segment after a word, /api/u/zeynep-ak, is a path parameter since review 20: A1-02.)
+    ["a profile slug in a path", [me(), entry({ url: O + "/zeynep-ak/settings", reqHeaders: H, resBody: { theme: "dark" } })]],
     ["the API host named after the person", [me("https://zeynep-ak.myshopify.com"), entry({ url: "https://zeynep-ak.myshopify.com/api/products", reqHeaders: H, resBody: [{ id: 1, title: "x" }] })]],
   ];
   for (const [label, entries] of cases) {

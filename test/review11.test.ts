@@ -135,8 +135,11 @@ describe("I2: the leak guard sees non-Latin names", () => {
 
   it.each(["张三", "홍길동", "山田太郎", "فلان"])("a path segment echoed under fullName (%s) is not written", (name) => {
     const r = generateFromHar(har([profile(name)]));
-    // Recorded under a personal key, so it is data: the guard refuses the files.
-    expect(r.leaks.length).toBeGreaterThan(0);
+    // Recorded under a personal key, so it is data: since review 20 (A1-04) a person's name right after a people
+    // collection becomes a path parameter; before, the guard refused the files. Either way it is never written.
+    expect(r.leaks).toEqual([]);
+    expect(r.model.endpoints.map((e) => e.path)).toEqual(["/api/users/{userId}/profile"]);
+    for (const f of Object.values(r.files)) expect(f).not.toContain(name);
     expect(renderChatPrompt(r.plan)).not.toContain(name);
   });
 

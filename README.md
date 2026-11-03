@@ -86,7 +86,7 @@ new AcmeShopClient({ token: () => getToken() });   // or a function, sync or asy
 ```
 
 - **Which options you get** depends on what the capture used: `token` (sent in `Authorization` with the scheme the app used, e.g. `Bearer …` or `Token …`, or bare if the app sent it bare; `Bearer` if no auth was seen), `basicAuth`, `apiKey` (in the header or query parameter the app used) and `cookie`. If no auth was seen, you get `token`.
-- **Credentials stay on your API's origin.** The token, API key, cookie, `headers` and the recorded app headers go only to `baseUrl`'s origin. A call to another origin in the capture (a payment or rates provider) gets none of them unless you list it in `trustedOrigins`; `origins` moves such calls elsewhere. Per-call `options.headers` are always sent.
+- **Credentials stay on your API's origin.** The token, API key, cookie, `headers` and the recorded app headers go only to `baseUrl`'s origin, on the first request and on every redirect (the client follows redirects itself and checks each hop's origin). A call to another origin in the capture (a payment or rates provider) gets none of them unless you list it in `trustedOrigins`; `origins` moves such calls elsewhere. Per-call `options.headers` go to the origin the call was made to, not to a redirect elsewhere. In a browser, which hides a redirect's target, the client doesn't follow a redirect and throws instead.
 - **A token function is called before every request**, so it can hand out a fresh token each time. For anything else computed per request (a CSRF header, a signature), pass `headers: async () => ({ … })`.
 - **Refreshing is up to you.** On a `401` the client doesn't retry or refresh: it throws `ApiError` with `status`, the parsed `body` and the `operation` that failed. Its message leaves out the query string, and `url` shows a query-string API key as `REDACTED`. One way to handle it:
 
@@ -122,7 +122,7 @@ HAR files contain live session cookies, tokens and often other people's data. ha
 
 Exit status 0 means the guard found nothing it could match, not that nothing leaked. A value with **no evidence** in the parts of the capture the guard reads (a word used once as a path segment that nothing else names) can't be recognised, one-word names of things (a category `"Books"`) are treated as vocabulary, and a value the app rewrites in a way the guard doesn't model (see [Limitations](#limitations)) is missed. So that you can judge such words yourself, the CLI (after the files it wrote), `har2sdk inspect` (and `inspect --json`, as `pathWords`) and the MCP `analyze_har` and `generate_sdk` responses list every path word written into `client.ts`, the ones seen in only one recorded path first; check that list before publishing generated code, and make a word that is data a parameter with `--param`. **Check `har2sdk inspect` and the generated files yourself before committing or publishing them.** Details, and exactly what is and isn't collected: [SECURITY.md](SECURITY.md).
 
-It's tested with the inputs of nineteen review rounds (`test/review*.test.ts`) and a generated privacy test that builds a random person and hides them in 30 kinds of places in a random capture, then checks every output, including a real MCP session, the CLI's `inspect --json` and every mock response (30 seeds in CI; the long run of 1,000 seeds passes).
+It's tested with the inputs of twenty review rounds (`test/review*.test.ts`) and a generated privacy test that builds a random person and hides them in 30 kinds of places in a random capture, then checks every output, including a real MCP session, the CLI's `inspect --json` and every mock response (30 seeds in CI; the long run of 1,000 seeds passes).
 
 **Treat `.har` files like passwords.** **Use it responsibly:** reverse-engineering an API you don't own can break its terms of use. Good uses: your own apps, legacy internal systems, services you're allowed to integrate with. Please don't publish SDKs for other companies' services.
 
@@ -133,20 +133,22 @@ The engine is deterministic; naming is where a language model helps. What a mode
 **MCP server** (Claude Code, Claude Desktop, Cursor, any MCP client):
 
 ```bash
-claude mcp add har2sdk -- npx -y har2sdk mcp
+claude mcp add har2sdk -- npx -y har2sdk@0.6.16 mcp
 ```
+
+The version is pinned on purpose: an MCP server started with `npx` runs again every time your editor starts, and an unpinned one would download and run whatever release is newest then, without a review step. Change the version when you choose to update.
 
 <details><summary>Claude Desktop / Cursor config</summary>
 
 ```json
 {
   "mcpServers": {
-    "har2sdk": { "command": "npx", "args": ["-y", "har2sdk", "mcp"] }
+    "har2sdk": { "command": "npx", "args": ["-y", "har2sdk@0.6.16", "mcp"] }
   }
 }
 ```
 
-On Windows, if the server doesn't start, use `"command": "cmd", "args": ["/c", "npx", "-y", "har2sdk", "mcp"]`.
+On Windows, if the server doesn't start, use `"command": "cmd", "args": ["/c", "npx", "-y", "har2sdk@0.6.16", "mcp"]`.
 </details>
 
 Then ask: *"Turn ~/Downloads/capture.har into an SDK with great names."* Claude calls `analyze_har`, `inspect_endpoint` and `generate_sdk`. The server writes to `har2sdk-out` next to the HAR file; `out_dir` must stay inside the HAR's folder, the server's working directory (not `/` or your home folder) or the temp directory. It never writes through a symbolic link (a linked `har2sdk-out` or `har2sdk.annotations.json` is an error).
@@ -210,6 +212,7 @@ har2sdk mcp                               Start the MCP server
 --no-enums               Don't emit literal unions
 --no-merge               Don't merge sibling paths into {params}
 --bind <address>         (mock) Interface to listen on (default 127.0.0.1)
+--allow-host <name>      (mock, with --bind) Also answer requests for this host name (repeatable)
 --raw                    (mock) Serve recorded bodies unscrubbed (default: fake data)
 ```
 

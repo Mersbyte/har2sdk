@@ -154,6 +154,16 @@ export class TypeRegistry {
    * was itself recorded as a value, or many keys each seen exactly once across
    * several samples (a dictionary keyed by something that varies).
    */
+  /**
+   * Does {@link fromShape} type this shape as one named object (an interface)? Otherwise it is an array, a union,
+   * a map or a scalar, and a name given to the whole must not also go to an object inside it.
+   */
+  namesWhole(shape: Shape | undefined): boolean {
+    if (!shape || shape.count === 0 || !shape.object || shape.object.props.size === 0) return false;
+    if (shape.boolean || shape.number || shape.string || shape.array || shape.map || shape.null) return false;
+    return !this.keysAreData(shape.object);
+  }
+
   private keysAreData(obj: NonNullable<Shape["object"]>): boolean {
     const keys = [...obj.props.keys()];
     if (!keys.length) return false;

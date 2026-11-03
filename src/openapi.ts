@@ -22,14 +22,14 @@ export function generateOpenApi(plan: Plan, opts: OpenApiOptions = {}): Record<s
 
   for (const op of restOps) {
     const item = (paths[specPath(op.ep)] ??= {});
-    putOperation(item, op.ep.method, restOperation(op, opts));
+    putOperation(item, op.ep.method, onOrigin(restOperation(op, opts), op.foreignOrigin), !!op.foreignOrigin);
   }
 
   // tRPC procedures each get their own path: /api/trpc/user.byId
   for (const op of ops.filter((o) => o.ep.rpc?.kind === "trpc")) {
     const path = trimTrailingSlashes(specPath(op.ep)) + "/" + op.ep.rpc!.procedure;
     const item = (paths[path] ??= {});
-    putOperation(item, op.ep.method, trpcOperation(op));
+    putOperation(item, op.ep.method, onOrigin(trpcOperation(op), op.foreignOrigin), !!op.foreignOrigin);
   }
 
   // JSON-RPC methods share one URL: one operation, one body variant per method.
@@ -42,7 +42,8 @@ export function generateOpenApi(plan: Plan, opts: OpenApiOptions = {}): Record<s
   for (const group of rpcGroups.values()) {
     const first = group[0]!.ep;
     const item = (paths[specPath(first)] ??= {});
-    putOperation(item, first.method, jsonRpcOperation(group, rpcIndex++ === 0 ? "jsonRpc" : `jsonRpc${rpcIndex}`));
+    const foreign = group[0]!.foreignOrigin;
+    putOperation(item, first.method, onOrigin(jsonRpcOperation(group, rpcIndex++ === 0 ? "jsonRpc" : `jsonRpc${rpcIndex}`), foreign), !!foreign);
   }
 
   // All GraphQL operations on one path+method become a single OpenAPI operation.
@@ -55,7 +56,8 @@ export function generateOpenApi(plan: Plan, opts: OpenApiOptions = {}): Record<s
   for (const group of gqlGroups.values()) {
     const first = group[0]!.ep;
     const item = (paths[specPath(first)] ??= {});
-    putOperation(item, first.method, graphqlOperation(group, gqlIndex++ === 0 ? "graphql" : `graphql${gqlIndex}`));
+    const foreign = group[0]!.foreignOrigin;
+    putOperation(item, first.method, onOrigin(graphqlOperation(group, gqlIndex++ === 0 ? "graphql" : `graphql${gqlIndex}`), foreign), !!foreign);
   }
 
   const securitySchemes: Record<string, unknown> = {};
@@ -110,11 +112,10 @@ function restOperation(op: PlannedOp, opts: OpenApiOptions): Record<string, unkn
   const operation: Record<string, unknown> = {
     operationId: ep.name,
     tags: [ep.tag],
-    summary: ep.description?.split(/(?<=\.)\s/)[0] ?? `${ep.method} ${ep.path}`,
+    summary: ep.description?.split(/(?<=\.)\s/)[0] ?? `${ep.method} ${specPath(ep)}`,
     ...(ep.description ? { description: ep.description } : {}),
     ...(parameters.length ? { parameters } : {}),
   };
-  if (op.foreignOrigin) operation.servers = [{ url: op.foreignOrigin }];
 
   if (op.body) {
     const mime = op.body.kind === "json" ? (op.body.contentType ?? "application/json") : op.body.mimeType.split(";")[0] || "application/octet-stream";
@@ -256,23 +257,38 @@ const OPENAPI_METHODS = new Set(["get", "put", "post", "delete", "options", "hea
  * Put an operation under its method. A method OpenAPI has no key for (WebDAV's PROPFIND, anything a
  * capture holds) goes under `x-har2sdk-methods` instead, so the document stays valid.
  */
-function putOperation(item: Record<string, unknown>, method: string, operation: unknown): void {
+function putOperation(item: Record<string, unknown>, method: string, operation: unknown, foreign = false): void {
   const m = method.toLowerCase();
-  if (OPENAPI_METHODS.has(m)) {
-    setOwn(item, m, operation);
-    return;
-  }
-  const ext = (item["x-har2sdk-methods"] ??= {}) as Record<string, unknown>;
-  setOwn(ext, method.toUpperCase(), operation);
+  const target = OPENAPI_METHODS.has(m) ? item : ((item["x-har2sdk-methods"] ??= {}) as Record<string, unknown>);
+  const key = OPENAPI_METHODS.has(m) ? m : method.toUpperCase();
+  // The same method + path on two origins: keep the API's own operation, never let another origin's replace it.
+  if (foreign && Object.hasOwn(target, key)) return;
+  setOwn(target, key, operation);
 }
 
 /**
- * The path as an OpenAPI path key. A literal segment that holds "/", "?", "#" or "%" once decoded
- * (GitLab's `platform%2Fbackend`) is written encoded, as the client requests it: decoded, it would name
- * another resource.
+ * An operation on another origin than the API's: its own server, and no security requirement, since the client
+ * sends no credentials there unless the user lists the origin in `trustedOrigins` (a generator reading the
+ * document-wide `security` would otherwise send the token to a third party).
  */
-function specPath(ep: { path: string; trailingSlash?: true; tokens: readonly ({ kind: "literal"; value: string } | { kind: "param"; name: string; suffix?: string })[] }): string {
-  if (!ep.tokens.some((t) => (t.kind === "literal" ? t.value : (t.suffix ?? "")).match(/[%/?#]/))) return ep.path;
-  const enc = (x: string) => x.replace(/[%/?#]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0"));
-  return "/" + ep.tokens.map((t) => (t.kind === "param" ? `{${t.name}}${enc(t.suffix ?? "")}` : enc(t.value))).join("/") + (ep.trailingSlash ? "/" : "");
+function onOrigin(operation: Record<string, unknown>, foreignOrigin: string | undefined): Record<string, unknown> {
+  if (!foreignOrigin) return operation;
+  operation.servers = [{ url: foreignOrigin }];
+  operation.security = [];
+  const note = `Served by ${foreignOrigin}, another origin than the API's: no credentials are sent to it unless you trust it.`;
+  operation.description = typeof operation.description === "string" ? `${operation.description}\n\n${note}` : note;
+  return operation;
+}
+
+/**
+ * The path as an OpenAPI path key. Literal text is percent-encoded as the client requests it, plus `'` and `*`: so a
+ * segment holding "/", "?", "#" or "%" once decoded (GitLab's `platform%2Fbackend`) doesn't name another
+ * resource, a recorded `{name}` (an unexpanded front-end template) isn't taken for a path parameter, and quotes,
+ * backticks, backslashes, `${` and `*` + `/` from a recorded URL can't close a string or a comment in code a downstream
+ * generator writes from the key. `$`, `@`, `:` and the like stay as recorded (`/odata/$metadata`).
+ */
+function specPath(ep: { path: string; trailingSlash?: true; tokens: readonly ({ kind: "literal"; value: string } | { kind: "param"; name: string; prefix?: string; suffix?: string })[] }): string {
+  const enc = (x: string) => encodeURIComponent(x).replace(/%(40|3A|21|24|26|28|29|2B|2C|3B|3D)/gi, (m) => decodeURIComponent(m)).replace(/['*]/g, (c) => (c === "'" ? "%27" : "%2A"));
+  if (!ep.tokens.some((t) => { const x = t.kind === "literal" ? t.value : (t.prefix ?? "") + (t.suffix ?? ""); return enc(x) !== x; })) return ep.path;
+  return "/" + ep.tokens.map((t) => (t.kind === "param" ? `${enc(t.prefix ?? "")}{${t.name}}${enc(t.suffix ?? "")}` : enc(t.value))).join("/") + (ep.trailingSlash ? "/" : "");
 }

@@ -155,10 +155,8 @@ export function createMcpServer(): McpServer {
     async ({ har_path, hosts }) => {
       try {
         const { model, exchanges } = await load(har_path, hosts);
-        if (!model.endpoints.length) {
-          if (hosts?.length && model.stats.dropped["host-filter"]) return fail(`None of the ${model.stats.entries} requests is on ${hosts.join(", ")}. Call analyze_har without hosts to see what the capture has.`);
-          return fail(`No API calls found (${model.stats.entries} requests, all noise). Was "Preserve log" on and did the app make XHR/fetch calls?`);
-        }
+        const none = noEndpoints(model, hosts);
+        if (none) return fail(none);
         const plan = buildPlan(model);
         // The words the leak guard can't judge, for the user to check (redacted like everything else here).
         const words = renderPathWords(plan, literalPathWords(plan, exchanges), { limit: 20, for: "mcp" });
@@ -229,6 +227,10 @@ export function createMcpServer(): McpServer {
     async ({ har_path, out_dir, base_url, hosts, annotations, allow_leaks }) => {
       try {
         const { model, exchanges, path } = await load(har_path, hosts);
+        // No endpoint (a typo in `hosts`, a capture without API calls): fail before writing, as analyze_har does,
+        // instead of replacing a working client.ts with an empty one.
+        const none = noEndpoints(model, hosts);
+        if (none) return fail(none);
         const outDir = out_dir ? resolvePath(out_dir) : join(dirname(path), "har2sdk-out");
         // Only write next to the capture, inside the server's working directory or the temp directory.
         // A working directory of "/" or the home folder would mean "anywhere".
@@ -320,4 +322,11 @@ export function createMcpServer(): McpServer {
 export async function runMcpServer(): Promise<void> {
   const server = createMcpServer();
   await server.connect(new StdioServerTransport());
+}
+
+/** Why a model has nothing to generate, or undefined when it has endpoints. */
+function noEndpoints(model: { endpoints: readonly unknown[]; stats: { entries: number; dropped: Record<string, number | undefined> } }, hosts: readonly string[] | undefined): string | undefined {
+  if (model.endpoints.length) return undefined;
+  if (hosts?.length && model.stats.dropped["host-filter"]) return `None of the ${model.stats.entries} requests is on ${hosts.join(", ")}. Call analyze_har without hosts to see what the capture has.`;
+  return `No API calls found (${model.stats.entries} requests, all noise). Was "Preserve log" on and did the app make XHR/fetch calls?`;
 }

@@ -59,10 +59,16 @@ export interface Taint {
    * never vocabulary: a property named like one is the secret itself, even if it is the object's only key.
    */
   secrets: Set<string>;
+  /**
+   * The identities known only from weak evidence (a plain word under `from` / `to` / `by`, a mailbox's local
+   * part). They are still identities for the scanner and the mock, but not evidence enough to turn a path
+   * segment into a parameter on their own: `{"returnTo":"cart"}` doesn't make `/cart/items` a member path.
+   */
+  weakIdentities: Set<string>;
 }
 
 export function emptyTaint(): Taint {
-  return { values: new Set(), aliases: new Set(), allowed: new Set(), identities: new Set(), identityForms: new Set(), labels: new Set(), nameParts: new Set(), secrets: new Set() };
+  return { values: new Set(), aliases: new Set(), allowed: new Set(), identities: new Set(), identityForms: new Set(), labels: new Set(), nameParts: new Set(), secrets: new Set(), weakIdentities: new Set() };
 }
 
 const IDENTITY_WORDS = new Set(
@@ -121,11 +127,25 @@ function identityKey(key: string): boolean {
   return w.length >= 2 && IDENTITY_WORDS.has(w[w.length - 2]!) && ["name", "login", "slug", "handle", "key", "adi", "adı", "nombre", "nom"].includes(last);
 }
 
-/** A key that is only `from`, `to` or `by`: an identity key whose values are often words of the app. */
+/** Actions done by or to a person: `assignedTo`, `createdBy`, `sentFrom` name one. */
+const PERSON_ACTIONS = new Set(
+  "assigned created updated modified edited changed sent owned reviewed approved rejected invited shared requested submitted deleted removed posted uploaded added closed opened merged signed written authored published followed liked blocked managed delegated escalated transferred forwarded referred reported resolved verified confirmed cancelled canceled booked paid purchased sold handled checked mentioned replied commented messaged".split(
+    " ",
+  ),
+);
+
+/**
+ * A key ending in `from`, `to` or `by` whose value is as often a word of the app as a person: the bare word,
+ * or a route, field or source (`returnTo`, `redirect_to`, `sortedBy`, `poweredBy`, `importedFrom`). A key whose
+ * first part is an action done by a person (`assignedTo`, `createdBy`) is a strong identity key.
+ */
 function weakIdentityKey(key: string | undefined): boolean {
   if (!key) return false;
   const w = words(key.replace(/^x-/, ""));
-  return w.length === 1 && WEAK_IDENTITY_KEYS.has(w[0]!);
+  if (!w.length || !WEAK_IDENTITY_KEYS.has(w[w.length - 1]!)) return false;
+  if (w.length === 1) return true;
+  const before = w[w.length - 2]!;
+  return !PERSON_ACTIONS.has(before) && !IDENTITY_WORDS.has(before);
 }
 
 /** A key that is only `ref`, `number`, `no`…: not `reservationRef` or `orderNumber`, which name a record. */
@@ -467,11 +487,14 @@ export class TaintCollector {
   }
 
   /** Always data, whatever it looks like (inline GraphQL values, identity headers). */
-  addAlways(value: string, identity = false): void {
+  addAlways(value: string, identity = false, weak = false): void {
     const v = value.trim();
     const lower = v.toLowerCase();
     if (dataLength(v) < 3 || COMMON.has(lower) || VERSIONISH.test(v)) return;
-    if (identity) this.identity(lower);
+    if (identity) this.identity(lower, weak);
+    // A plain word under `from` / `to` / `by` is a weak identity only, as in a REST body: the capture's own
+    // endpoints can rule it out.
+    if (weak && !/\p{Nd}/u.test(v) && !isDataLike(v)) return;
     if (dataLength(v) >= 4) this.taint.values.add(lower);
   }
 
@@ -740,17 +763,24 @@ export function collectTaint(exchanges: Exchange[], evidence: Exchange[] = []): 
   // endpoint's word, not the user's name. Only a top-level endpoint establishes that: the word right after the
   // API root or version, ending the path. A word under another one (/inbox/parker, /people/okilic) is a member,
   // and stays an identity.
+  // Since review 20 the same holds for a collection there, a word followed by an id (GET /api/v1/orders/48213),
+  // and the API root or version may be v1beta, a dated version (2024-01), a locale (en-us), with a .json suffix.
+  // A word followed by another word (/api/v1/okilic/projects) is not enough: a username sits there too.
   if (c.weakOnly.size) {
+    const root = /^(api|rest|graphql|admin|v\d+(?:\.\d+)*(?:[a-z]+\d*)?|\d+(?:\.\d+)?|\d{4}-\d{2}(?:-\d{2})?|[a-z]{2}-[a-z]{2})$/;
     for (const ex of exchanges) {
       const segs = ex.pathname.toLowerCase().split("/").filter(Boolean);
-      const last = segs[segs.length - 1];
-      const prev = segs[segs.length - 2];
-      if (!last || !c.weakOnly.has(last) || !/^\p{L}+$/u.test(last)) continue;
-      if (prev !== undefined && !/^(api|rest|graphql|v\d+(?:\.\d+)*|\d+(?:\.\d+)?)$/.test(prev)) continue;
-      c.taint.identities.delete(last);
-      c.weakOnly.delete(last);
+      for (let j = 0; j < segs.length; j++) {
+        const word = segs[j]!.replace(/\.(json|xml)$/, "");
+        if (!c.weakOnly.has(word) || !/^\p{L}+$/u.test(word)) continue;
+        if (!segs.slice(0, j).every((p) => root.test(p))) continue;
+        if (j < segs.length - 1 && !(j === segs.length - 2 && (isIdShaped(segs[j + 1]!) || /^\p{Nd}+$/u.test(segs[j + 1]!)))) continue;
+        c.taint.identities.delete(word);
+        c.weakOnly.delete(word);
+      }
     }
   }
+  for (const w of c.weakOnly) c.taint.weakIdentities.add(w);
   return c.taint;
 }
 
@@ -937,18 +967,25 @@ function unescapeJs(body: string): string {
   return out;
 }
 
-const NAMED_VALUE_TAG = /<(?:meta|input|param|data|option|button|textarea|output|select)\b[^>]*>/gi;
+/** The head of a tag that names a value. Its end is found with indexOf: `[^>]*>` from every unclosed head was quadratic. */
+const NAMED_VALUE_TAG = /<(?:meta|input|param|data|option|button|textarea|output|select)\b/gi;
 // Anchored at the start of a name (nothing of its own kind before it): a long name without "=" is tried once,
 // not again from each of its characters.
 const TAG_ATTRIBUTE = /(?<![\w:.-])([\w:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g;
 
 /** `<meta name="user-login" content="okilic">`, `<input name="username" value="okilic">`: [name, value] pairs. */
-function namedValues(markup: string): [string, string][] {
+export function namedValues(markup: string): [string, string][] {
   const out: [string, string][] = [];
-  for (const m of markup.matchAll(NAMED_VALUE_TAG)) {
+  const head = new RegExp(NAMED_VALUE_TAG.source, "gi");
+  for (let m = head.exec(markup); m; m = head.exec(markup)) {
     if (out.length >= 5000) break;
+    // The same tags as /<head\b[^>]*>/: up to the next ">". With none left, no later tag can close either.
+    const end = markup.indexOf(">", m.index);
+    if (end < 0) break;
+    const tag = markup.slice(m.index, end + 1);
+    head.lastIndex = end + 1;
     const attrs = new Map<string, string>();
-    for (const a of m[0].matchAll(TAG_ATTRIBUTE)) attrs.set(a[1]!.toLowerCase(), decodeEntities(a[2] ?? a[3] ?? a[4] ?? ""));
+    for (const a of tag.matchAll(TAG_ATTRIBUTE)) attrs.set(a[1]!.toLowerCase(), decodeEntities(a[2] ?? a[3] ?? a[4] ?? ""));
     const name = attrs.get("name") ?? attrs.get("property") ?? attrs.get("itemprop");
     const value = attrs.get("content") ?? attrs.get("value");
     if (name && value) out.push([name, value]);
@@ -1078,34 +1115,81 @@ export function csvRows(text: string): string[][] | undefined {
  * and keep everything else: tags, attribute names, keys, punctuation.
  * Returns undefined for text that is neither (plain text).
  */
-export function mapTextFields(text: string, fn: (value: string | number, key: string | undefined) => unknown): string | undefined {
+export function mapTextFields(text: string, fn: (value: string | number, key: string | undefined) => unknown, structure?: MarkupStructure): string | undefined {
   const t = text.trimStart();
-  if (t.startsWith("<") && t.includes(">")) return mapMarkup(text, fn);
-  if (t.startsWith("{") || t.startsWith("[")) return mapJsonish(text, fn);
+  if (t.startsWith("<") && t.includes(">")) return mapMarkup(text, fn, structure);
+  if (t.startsWith("{") || t.startsWith("[")) return !structure || isJsonPrefix(t) ? mapJsonish(text, fn) : undefined;
   return undefined;
+}
+
+/**
+ * How a rewriter treats markup structure. Without it (evidence collection) names and declarations are kept;
+ * the mock passes it so that a tag or attribute name holding recorded data (`<zkaya77>`) is faked like a JSON
+ * dictionary key, and a `<?…?>` / `<!…>` body is scrubbed as free text. With it, text that starts with "[" or
+ * "{" is read as truncated JSON only when it is a JSON prefix: an INI section or a log line (`[user]`,
+ * `[2026-11-02] INFO …`) is plain text and goes line by line.
+ */
+export interface MarkupStructure {
+  name(name: string): string;
+  text(text: string): string;
+}
+
+/**
+ * Is this text JSON cut off somewhere (or whole)? Strings, numbers and true / false / null with JSON
+ * punctuation, and at the end at most a cut-off literal. Linear: one pass of a regex without nested repeats.
+ */
+export function isJsonPrefix(text: string): boolean {
+  const rest = text.replace(/"(?:[^"\\]|\\.)*"?|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|\b(?:true|false|null)\b/g, " ");
+  return /^[\s{}[\]:,]*(?:t|tr|tru|f|fa|fal|fals|n|nu|nul|-)?$/.test(rest);
 }
 
 const MARKUP_TOKEN = /<!\[CDATA\[[\s\S]*?(?:\]\]>|$)|<!--[\s\S]*?(?:-->|$)|<[!?][^>]*>?|<\/?[A-Za-z][^>]*>?|[^<]+|</g;
 
-function mapMarkup(text: string, fn: (value: string | number, key: string | undefined) => unknown): string {
+/** An XML name made from a faked one: characters a name can't hold become "_", and it starts with a letter. */
+function xmlName(s: string): string {
+  const out = s.replace(/[^\w:.-]/g, "_");
+  return /^[A-Za-z_]/.test(out) ? out : "x" + out;
+}
+
+function mapMarkup(text: string, fn: (value: string | number, key: string | undefined) => unknown, structure?: MarkupStructure): string {
   const stack: string[] = [];
   const str = (v: unknown) => (typeof v === "string" ? v : String(v));
+  const rename = (n: string) => {
+    if (!structure) return n;
+    const out = structure.name(n);
+    return out === n ? n : xmlName(out);
+  };
   return text.replace(MARKUP_TOKEN, (tok) => {
     if (tok.startsWith("<![CDATA[")) {
       const inner = tok.slice(9).replace(/\]\]>$/, "");
       return `<![CDATA[${inner.trim() ? str(fn(inner, stack[stack.length - 1])) : inner}]]>`;
     }
     if (tok.startsWith("<!--")) return "<!-- -->";
-    if (tok.startsWith("<!") || tok.startsWith("<?")) return tok;
+    if (tok.startsWith("<!") || tok.startsWith("<?")) {
+      if (!structure) return tok;
+      // The XML declaration and a bare doctype are structure; any other declaration or processing
+      // instruction body (<!ENTITY u "…">, <?user …?>) is free text.
+      if (/^<\?xml(?:\s+(?:version|encoding|standalone)\s*=\s*(?:"[\w.-]*"|'[\w.-]*'))*\s*\?>$/.test(tok)) return tok;
+      const doctype = tok.match(/^<!DOCTYPE\s+([A-Za-z][\w:.-]*)\s*>$/i);
+      if (doctype) return `<!DOCTYPE ${rename(doctype[1]!)}>`;
+      const open = tok.slice(0, 2);
+      const close = tok.endsWith("?>") && open === "<?" ? "?>" : tok.endsWith(">") ? ">" : "";
+      const inner = tok.slice(2, tok.length - close.length);
+      return open + structure.text(inner).replace(/[<>]/g, "") + close;
+    }
     const tag = tok.match(/^<(\/?)([A-Za-z][\w:.-]*)/);
     if (tag) {
       const name = tag[2]!.replace(/^.*:/, "");
       if (tag[1]) {
         const at = stack.lastIndexOf(name);
         if (at >= 0) stack.length = at;
-        return tok;
+        return structure ? `</${rename(tag[2]!)}${tok.slice(2 + tag[2]!.length)}` : tok;
       }
       if (!/\/>$/.test(tok) && !/^(br|hr|img|input|meta|link|area|base|col|embed|source|track|wbr)$/i.test(name)) stack.push(name);
+      if (structure) {
+        const renamed = rename(tag[2]!);
+        if (renamed !== tag[2]) tok = `<${renamed}${tok.slice(1 + tag[2]!.length)}`;
+      }
       // Attribute values; namespace declarations are structure.
       // An attribute starts after white space: anchoring there keeps this linear on a
       // tag with a huge run of name characters (no backtracking from every position).
@@ -1113,7 +1197,7 @@ function mapMarkup(text: string, fn: (value: string | number, key: string | unde
       return tok.replace(/(\s)([\w:.-]+)(\s*=\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+?)(?=\s|\/?>|$))/g, (m, lead: string, attr: string, eq: string, dq?: string, sq?: string, bare?: string) => {
         if (/^xmlns(:|$)/.test(attr)) return m;
         const out = str(fn(decodeEntities(dq ?? sq ?? bare ?? ""), attr.replace(/^.*:/, ""))).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
-        return `${lead}${attr}${eq}"${out}"`;
+        return `${lead}${rename(attr)}${eq}"${out}"`;
       });
     }
     if (tok === "<" || !tok.trim()) return tok;
@@ -1164,12 +1248,13 @@ function graphqlLiterals(doc: string, c: TaintCollector): void {
   for (const m of graphqlLiteralMatches(doc)) {
     // `login: "mdemir"`: the argument name says what the value is.
     const identity = !!m[1] && (isIdentityKey(m[1]) || isIdKey(m[1]));
+    const weak = identity && weakIdentityKey(m[1]);
     if (m[0].startsWith("#")) {
       // Comments stay in the document: anything data-like in them is data.
       for (const [start, end] of quotedStrings(m[0])) c.addAlways(m[0].slice(start + 1, end - 1));
       for (const w of m[0].match(/[^\s"'<>,;()[\]{}]{4,}/g) ?? []) if (isDataLike(w)) c.add(w);
-    } else if (m[2] !== undefined) c.addAlways(m[2].trim(), identity);
-    else if (m[3] !== undefined) c.addAlways(m[3], identity);
+    } else if (m[2] !== undefined) c.addAlways(m[2].trim(), identity, weak);
+    else if (m[3] !== undefined) c.addAlways(m[3], identity, weak);
     else if (m[4] !== undefined && isGraphqlDataNumber(m[1], Number(m[4])) && digitCount(m[4]) >= 4) c.taint.values.add(m[4].toLowerCase());
   }
 }
@@ -1188,7 +1273,7 @@ function graphqlVariableArgs(body: unknown, c: TaintCollector): void {
       for (const x of Array.isArray(value) ? value.slice(0, 200) : [value]) {
         if (typeof x !== "string") continue;
         c.add(x, arg);
-        if (isIdentityKey(arg)) c.addAlways(x, true);
+        if (isIdentityKey(arg)) c.addAlways(x, true, weakIdentityKey(arg));
       }
     }
   }

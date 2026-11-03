@@ -194,20 +194,35 @@ export function analyzeExchanges(all: Exchange[], opts: AnalyzeOptions = {}): Ap
   const templates = templatePaths([...samples.values()], { noMerge: opts.noMerge, params: opts.params, taint, warnings, members });
 
   // --- 2. group into endpoints -------------------------------------------------
-  // The primary origin is the one with the most distinct endpoints, not the
-  // most requests: a chatty telemetry host shouldn't name the SDK.
+  // The primary origin becomes `baseUrl`, the only origin that gets the user's credentials. So it is the
+  // origin the app sent its own credentials to (an authorization header beats an API key, which beats a
+  // session cookie), and only among equals the one with the most distinct endpoints, not the most requests:
+  // a vendor with more endpoints, or a chatty telemetry host, shouldn't get the token or name the SDK.
   const originCounts = new Map<string, number>();
   const originPaths = new Map<string, Set<string>>();
+  const originAuth = new Map<string, number>();
   for (const ex of kept) {
     originCounts.set(ex.origin, (originCounts.get(ex.origin) ?? 0) + 1);
+    originAuth.set(ex.origin, Math.max(originAuth.get(ex.origin) ?? 0, credentialStrength(ex, taint)));
     const t = templates.get(ex.origin + ex.pathname);
     if (t) originPaths.set(ex.origin, (originPaths.get(ex.origin) ?? new Set()).add(ex.method + " " + t.template));
   }
   const origins = [...originCounts.entries()]
     .map(([origin, count]) => ({ origin, count }))
-    .sort((a, b) => (originPaths.get(b.origin)?.size ?? 0) - (originPaths.get(a.origin)?.size ?? 0) || b.count - a.count);
+    .sort(
+      (a, b) =>
+        (originAuth.get(b.origin) ?? 0) - (originAuth.get(a.origin) ?? 0) ||
+        (originPaths.get(b.origin)?.size ?? 0) - (originPaths.get(a.origin)?.size ?? 0) ||
+        b.count - a.count,
+    );
   const primaryOrigin = origins[0]?.origin ?? "";
   const multiOrigin = origins.length > 1;
+  const alsoCredentialed = origins.slice(1).filter((o) => (originAuth.get(o.origin) ?? 0) > 0);
+  if (alsoCredentialed.length) {
+    warnings.push(
+      `Credentials were also recorded on ${alsoCredentialed.map((o) => o.origin).join(", ")}. The client sends yours only to baseUrl (${primaryOrigin}); list another origin in \`trustedOrigins\` if it is yours too.`,
+    );
+  }
 
   const acc = new Map<string, Accumulator>();
   // GraphQL operations that share a name (or root fields) but send different
@@ -1170,6 +1185,19 @@ const TRACKING_COOKIE =
 function nameCarriesData(name: string, taint: Taint, whole = true): boolean {
   if (whole && (isDataLike(name) || isTainted(taint, name))) return true;
   return name.split(/[._+\-]+/).some((p) => p.length >= 3 && (isTainted(taint, p) || isDataLike(p) || isIdentity(taint, p)));
+}
+
+/** How strongly a request carries the app's own credentials: 3 authorization, 2 API key, 1 session cookie, 0 none. */
+function credentialStrength(ex: Exchange, taint: Taint): number {
+  if (ex.requestHeaders.get("authorization")) return 3;
+  for (const name of ex.requestHeaders.keys()) if (API_KEY_HEADERS.test(name)) return 2;
+  for (const [k, v] of ex.query) if (API_KEY_QUERY.test(k) && v.length >= 8) return 2;
+  const cookie = ex.requestHeaders.get("cookie");
+  if (cookie) for (const part of cookie.split(";")) {
+    const name = part.split("=")[0]?.trim();
+    if (name && !TRACKING_COOKIE.test(name) && !nameCarriesData(name, taint)) return 1;
+  }
+  return 0;
 }
 
 function detectAuth(exchanges: Exchange[], taint: Taint): AuthInfo {

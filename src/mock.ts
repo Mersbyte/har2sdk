@@ -341,7 +341,14 @@ function scrubTextBody(raw: string, scrubber: Scrubber, taint: Taint): string {
   let out: string;
   if (csvRows(raw)) out = scrubText(scrubCsv(raw, scrubber), taint);
   else {
-    const mapped = mapTextFields(raw, (v, k) => scrubber.json(v, k));
+    const mapped = mapTextFields(raw, (v, k) => scrubber.json(v, k), {
+      // A tag or attribute name is faked like a JSON dictionary key; declarations are free text.
+      name: (n) => {
+        const k = scrubber.key(n);
+        return k === n ? scrubber.compoundKey(n) : k;
+      },
+      text: (t) => (t.trim() ? String(scrubber.json(t.trim())) : t),
+    });
     out =
       mapped ??
       raw
