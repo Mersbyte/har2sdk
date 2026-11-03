@@ -10,6 +10,9 @@
  * DJ-01/DJ-02 (and B2-01): `openapi.json` path keys kept quotes, backticks, `${…}` and braces from a recorded URL raw:
  *        swagger-typescript-api 13.12.1 and openapi-typescript-codegen pasted them into code that ran, and a recorded
  *        `{tenantId}` became a path template with no parameter.
+ * DJ-04: operations on another origin inherited the document-wide `security`, so a client generated from the spec
+ *        sent the main token to the third party. DJ-05: GraphQL / JSON-RPC / tRPC operations on another origin had
+ *        no `servers`, and replaced the API's own operation on the same path without a warning.
  */
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -426,6 +429,73 @@ describe("DJ-01/DJ-02 openapi.json path keys are encoded: no quote, backtick, br
       }
       const r = generateFromHar(har(entries));
       await checkSpec(JSON.parse(r.files["openapi.json"]!));
+    }
+  });
+});
+
+// ── DJ-04 / DJ-05 ──────────────────────────────────────────────────────────────
+
+describe("DJ-04/DJ-05 operations on another origin need no credentials and never replace the API's own", () => {
+  const API = "https://api.shop.test";
+  const JWT = "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJlLXNpZ25hdHVyZQ";
+  const ops = (spec: any) =>
+    Object.entries<any>(spec.paths).flatMap(([path, item]) => Object.entries<any>(item).map(([method, op]) => ({ path, method, op })));
+
+  it("the reviewer's capture: an unauthenticated CDN config call carries `security: []` and its own server", async () => {
+    const auth = { authorization: JWT };
+    const r = generate(
+      har([
+        entry({ url: `${API}/v1/orders`, reqHeaders: auth, resBody: [{ id: 1, total: 2 }] }),
+        entry({ url: `${API}/v1/me`, reqHeaders: auth, resBody: { id: 1, plan: "pro" } }),
+        entry({ url: "https://cdn.other.test/v1/config", resBody: { theme: "dark" } }),
+        entry({ url: "https://cdn.other.test/v1/products", resBody: [{ id: 1, sku: "a" }] }),
+      ]),
+    );
+    const spec = JSON.parse(r.files["openapi.json"]!);
+    expect(spec.security).toEqual([{ bearerAuth: [] }]);
+    const config = spec.paths["/v1/config"].get;
+    expect(config.servers).toEqual([{ url: "https://cdn.other.test" }]);
+    expect(config.security).toEqual([]);
+    expect(spec.paths["/v1/orders"].get.security).toBeUndefined();
+    expect(await new Validator().validate(spec)).toMatchObject({ valid: true });
+  });
+
+  it("GraphQL and JSON-RPC on a partner origin get its server, and the API's own operation on the same path stays", () => {
+    const rpc = (url: string, method: string, reqHeaders: Record<string, string> = {}) =>
+      entry({ method: "POST", url, reqHeaders, reqBody: { jsonrpc: "2.0", id: 1, method }, resBody: { jsonrpc: "2.0", id: 1, result: { ok: true } } });
+    const gql = (url: string, name: string, reqHeaders: Record<string, string> = {}) =>
+      entry({ method: "POST", url, reqHeaders, reqBody: { operationName: name, query: `query ${name} { ${name.toLowerCase()} { id } }`, variables: {} }, resBody: { data: { [name.toLowerCase()]: { id: 1 } } } });
+    const auth = { authorization: JWT };
+    for (const order of [0, 1]) {
+      const own = [rpc(`${API}/rpc`, "getStatus", auth), gql(`${API}/graphql`, "Me", auth)];
+      const partner = [rpc("https://rpc.partner.test/rpc", "getInfo"), gql("https://gql.partner.test/graphql", "Rates")];
+      const r = generate(har(order ? [...partner, ...own] : [...own, ...partner]));
+      const spec = JSON.parse(r.files["openapi.json"]!);
+      expect(spec.paths["/rpc"].post["x-jsonrpc-methods"].map((m: any) => m.method)).toEqual(["getStatus"]);
+      expect(JSON.stringify(spec.paths["/graphql"].post)).toContain("Me");
+      expect(spec.paths["/rpc"].post.servers).toBeUndefined();
+      expect(r.plan.warnings.join("\n")).toContain(`openapi.json keeps the one on ${API}`);
+    }
+  });
+
+  it("generated: every operation on another origin has `security: []` whatever the auth style", SLOW, () => {
+    const rnd = rng(20_5);
+    const styles = [{ authorization: JWT }, { authorization: "Basic " + Buffer.from("demo:pw-synthetic").toString("base64") }, { "x-api-key": "k_live_3f9a8b7c6d5e4f3a" }, { cookie: "sessionid=s3ss10nvalue77" }];
+    for (let i = 0; i < 20; i++) {
+      const hdr = pick(rnd, styles);
+      const third = `https://${word(rnd)}.${word(rnd, 2)}.test`;
+      const r = generateFromHar(
+        har([
+          entry({ url: `${API}/v1/${word(rnd, 2)}s`, reqHeaders: hdr, resBody: [{ id: 1, total: 2 }] }),
+          entry({ url: `${API}/v1/${word(rnd, 2)}s`, reqHeaders: hdr, resBody: [{ id: 1, total: 2 }] }),
+          entry({ url: `${third}/v2/${word(rnd, 2)}`, resBody: { ok: true } }),
+        ]),
+      );
+      const spec = JSON.parse(r.files["openapi.json"]!);
+      for (const { path, op } of ops(spec)) {
+        const foreign = op.servers && op.servers[0].url !== spec.servers[0].url;
+        expect(op.security, path).toEqual(foreign ? [] : undefined);
+      }
     }
   });
 });

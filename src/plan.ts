@@ -94,10 +94,9 @@ export function buildPlan(model: ApiModel, opts: PlanOptions = {}): Plan {
   // OpenAPI keys paths without a host: the same method + path on two origins collides.
   const seen = new Map<string, string>();
   for (const op of ops) {
-    if (op.ep.graphql || op.ep.rpc) continue;
-    const key = `${op.ep.method} ${op.ep.path}`;
+    const key = `${op.ep.method} ${op.ep.path}${op.ep.rpc?.kind === "trpc" ? "/" + op.ep.rpc.procedure : ""}`;
     const prev = seen.get(key);
-    if (prev && prev !== op.ep.origin) warnings.push(`${key} exists on ${prev} and ${op.ep.origin}; openapi.json keeps one of them (the SDK has both).`);
+    if (prev && prev !== op.ep.origin) warnings.push(`${key} exists on ${prev} and ${op.ep.origin}; openapi.json keeps the one on ${op.ep.origin === model.primaryOrigin ? op.ep.origin : prev} (the SDK has both).`);
     else seen.set(key, op.ep.origin);
   }
 
