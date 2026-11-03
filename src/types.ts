@@ -539,7 +539,7 @@ export function namedToJsonSchema(nt: NamedType, refPrefix = "#/components/schem
   for (const p of nt.props) {
     // A recorded key named like a reference keyword (`$ref`) would read as a reference to tools that look for
     // that key anywhere (openapi-schema-validator fails on it). An exact-match pattern describes the same key.
-    if (REF_KEYWORDS.has(p.name)) setOwn(patternProperties, "^" + p.name.replace(/\$/g, "\\$") + "$", toJsonSchema(p.type, refPrefix));
+    if (REF_KEYWORDS.has(p.name)) setOwn(patternProperties, "^" + p.name.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&") + "$", toJsonSchema(p.type, refPrefix));
     else setOwn(properties, p.name, toJsonSchema(p.type, refPrefix));
     if (!p.optional) required.push(p.name);
   }
