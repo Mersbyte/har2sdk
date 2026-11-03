@@ -126,7 +126,23 @@ export function generateTypeScript(plan: Plan): string {
     out.push(`// ─── GraphQL documents (as recorded) ${"─".repeat(34)}`, ``);
     for (const op of docs) out.push(`const ${docConst(op)} = ${templateLiteral(op.ep.graphql!.query!.trim())};`, ``);
   }
-  return out.join("\n").replace(/\n{3,}/g, "\n\n");
+  const code = out.join("\n").replace(/\n{3,}/g, "\n\n");
+  assertUniqueDeclarations(code);
+  return code;
+}
+
+/**
+ * A last check that the client can compile: every top-level name is declared once. A clash is a har2sdk bug,
+ * so the run fails loudly instead of writing a client.ts that `tsc` rejects.
+ */
+export function assertUniqueDeclarations(code: string): void {
+  const seen = new Set<string>();
+  for (const m of code.matchAll(/^(?:export )?(?:type|interface|class|function|const|let|enum) ([A-Za-z_$][\w$]*)/gm)) {
+    if (seen.has(m[1]!)) {
+      throw new Error(`har2sdk generated a client.ts that declares \`${m[1]}\` twice, so it wouldn't compile. This is a bug in har2sdk; please report it with \`har2sdk inspect --json\` output.`);
+    }
+    seen.add(m[1]!);
+  }
 }
 
 /** Just the type declarations (used for prompts and MCP responses). */

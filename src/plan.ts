@@ -171,12 +171,11 @@ function planOp(ep: Endpoint, model: ApiModel, registry: TypeRegistry, warnings:
   if (ep.requestBody) {
     const rb = ep.requestBody;
     const hint = ep.graphql ? P + "Variables" : ep.rpc ? P + "Input" : P + "Body";
-    registry.release(hint);
     let type: TypeNode;
     if (rb.missing) warnings.push(`${ep.id}: the request body was not recorded${rb.kind === "multipart" ? " (browsers leave out multipart uploads)" : ""}, so its type is \`${rb.kind === "multipart" ? "FormData" : "unknown"}\`.`);
     if (rb.kind === "multipart") type = { k: "unknown" };
     else if (rb.kind === "text") type = { k: "string" };
-    else type = registry.fromShape(rb.shape, [hint, (resource ?? P) + "Input"], resource);
+    else type = namedBody(registry, rb.shape, hint, [(resource ?? P) + "Input"], resource);
     body = { kind: rb.kind, mimeType: rb.mimeType, type, typeName: hint };
     const ct = rb.kind === "json" && !ep.graphql && !ep.rpc ? jsonMediaType(rb.mimeType) : undefined;
     if (ct) body.contentType = ct;
@@ -237,7 +236,7 @@ function planOp(ep: Endpoint, model: ApiModel, registry: TypeRegistry, warnings:
     } else {
       let es: Shape = emptyShape();
       for (const r of errs) es = mergeShapes(es, r.shape);
-      error = { type: registry.fromShape(es, [P + "Error", P + "ErrorBody"], undefined), typeName: P + "Error" };
+      error = { type: namedBody(registry, es, P + "Error", [P + "ErrorBody"]), typeName: P + "Error" };
       if (error.type.k === "ref" && error.type.name !== error.typeName && registry.isTaken(error.typeName)) error.typeName = P + "ErrorBody";
     }
   }
@@ -340,4 +339,18 @@ const OBJECT_MEMBERS = new Set(Object.getOwnPropertyNames(Object.prototype));
 export function jsonMediaType(mime: string): string | undefined {
   const m = mime.split(";")[0]!.trim().toLowerCase();
   return /^application\/[a-z0-9][a-z0-9!#$&^_.-]{0,100}\+json$/.test(m) ? m : undefined;
+}
+
+/**
+ * Type a body that is emitted under `name`. When the body is one object, its interface takes `name`; otherwise
+ * (an array of objects, a union, a map) `name` stays reserved for the alias and objects inside are named
+ * `name + "Item"`, so the two never declare the same identifier (`type CreateCartItemBody = CreateCartItemBody[]`).
+ */
+function namedBody(registry: TypeRegistry, shape: Shape, name: string, alternatives: string[], resource?: string): TypeNode {
+  if (registry.namesWhole(shape)) {
+    registry.release(name);
+    return registry.fromShape(shape, [name, ...alternatives], resource);
+  }
+  registry.reserve(name);
+  return registry.fromShape(shape, [name + "Item", ...alternatives.map((a) => a + "Item")], resource);
 }

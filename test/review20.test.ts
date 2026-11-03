@@ -5,7 +5,10 @@
  * C1-01: a redirect carried the API-key header, `headers` and the recorded default headers to another origin.
  * C1-02: `baseUrl` (the only origin that gets credentials) was the origin with the most endpoints, so a vendor
  *        with more endpoints got the token and the app's own API got none.
+ * C2-01: a JSON request body that is an array of objects (also JSON Patch, `eth_call` params, tRPC batch input)
+ *        declared its type name twice, so client.ts didn't compile, and the CLI still exited 0.
  */
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -13,8 +16,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { assertUniqueDeclarations } from "../src/codegen.js";
 import { generateFromHar } from "../src/index.js";
-import { entry, har } from "./helpers.js";
+import { ROOT, entry, har } from "./helpers.js";
 
 const O = "https://app.acme.test";
 const THIRD = "https://rates.thirdparty.test";
@@ -43,6 +47,34 @@ async function load(code: string): Promise<any> {
   const dir = tmp();
   writeFileSync(join(dir, "client.ts"), code);
   return import(pathToFileURL(join(dir, "client.ts")).href);
+}
+
+/** Compile a generated client.ts with the project's strict settings (as test/e2e.test.ts does). */
+function compile(code: string): string {
+  const dir = tmp();
+  writeFileSync(join(dir, "client.ts"), code);
+  writeFileSync(join(dir, "package.json"), '{ "type": "module" }');
+  writeFileSync(
+    join(dir, "tsconfig.json"),
+    JSON.stringify({
+      compilerOptions: {
+        strict: true,
+        noEmit: true,
+        target: "ES2022",
+        module: "NodeNext",
+        moduleResolution: "NodeNext",
+        lib: ["ES2022", "DOM"],
+        types: ["node"],
+        typeRoots: [join(ROOT, "node_modules/@types")],
+        exactOptionalPropertyTypes: true,
+        erasableSyntaxOnly: true,
+        skipLibCheck: true,
+      },
+      files: ["client.ts"],
+    }),
+  );
+  const r = spawnSync(process.execPath, [join(ROOT, "node_modules/typescript/bin/tsc"), "-p", dir], { encoding: "utf8" });
+  return (r.stdout + r.stderr).trim();
 }
 
 function generate(capture: string) {
@@ -294,5 +326,55 @@ describe("C1-02 baseUrl is the origin the app sent its credentials to, not the b
       const r = generateFromHar(har(entries));
       expect(r.plan.baseUrl, JSON.stringify({ hdr, nApp, nVendor })).toBe(app);
     }
+  });
+});
+
+// ── C2-01 ──────────────────────────────────────────────────────────────────────
+
+describe("C2-01 an array request body gets an alias and an item type, and the client compiles", () => {
+  const post = (url: string, body: unknown, resBody: unknown = { ok: true }) => entry({ method: "POST", url, reqBody: body, resBody });
+
+  it("the reviewer's capture: POST /api/v1/cart/items with [{sku, qty}, …]", () => {
+    const A = "https://api.shop.example";
+    const r = generate(har([0, 1, 2].map((i) => post(`${A}/api/v1/cart/items`, [{ sku: "SKU-1" + i, qty: i + 1 }, { sku: "SKU-2" + i, qty: 1 }]))));
+    const code = r.files["client.ts"]!;
+    expect(code).toContain("export type CreateCartItemBody = CreateCartItemBodyItem[];");
+    expect(compile(code)).toBe("");
+  }, SLOW.timeout);
+
+  it("JSON Patch, eth_call positional params and a tRPC array input compile too", () => {
+    const r = generate(
+      har([
+        ...[0, 1].map((i) => entry({ method: "PATCH", url: `https://api.shop.example/api/v1/products/${100 + i}`, reqMime: "application/json-patch+json", reqBody: [{ op: "replace", path: "/price", value: 5 + i }], resBody: { id: 100 + i } })),
+        ...[1, 2, 3].map((i) => post("https://rpc.chain.example/", { jsonrpc: "2.0", id: i, method: "eth_call", params: [{ to: "0x" + "ab".repeat(20), data: "0x70a08231" }, "latest"] }, { jsonrpc: "2.0", id: i, result: "0x00" })),
+        ...[0, 1, 2].map((i) => post("https://rpc.chain.example/api/trpc/items.bulkAdd", [{ sku: "A" + i }], { result: { data: { n: 1 } } })),
+      ]),
+    );
+    expect(compile(r.files["client.ts"]!)).toBe("");
+  }, SLOW.timeout);
+
+  it("an array error body (`[{message}]`) doesn't clash with its alias either", () => {
+    const r = generate(har([0, 1].map((i) => entry({ method: "POST", url: "https://api.shop.example/api/v1/orders", status: 422, reqBody: { qty: i }, resBody: [{ message: "qty too low", field: "qty" }] }))));
+    expect(compile(r.files["client.ts"]!)).toBe("");
+  }, SLOW.timeout);
+
+  it("a top-level name declared twice fails the run instead of writing a broken client", () => {
+    expect(() => assertUniqueDeclarations("export interface A {}\nexport type A = A[];\n")).toThrow(/declares `A` twice/);
+    expect(() => assertUniqueDeclarations("export interface A {}\n  type A = 1;\n")).not.toThrow();
+  });
+
+  it("generated: random array, union and nested bodies all compile", SLOW, () => {
+    const rnd = rng(20_3);
+    const bodies: string[] = [];
+    const ops: ReturnType<typeof entry>[] = [];
+    for (let i = 0; i < 16; i++) {
+      const res = `${word(rnd, 2)}s`;
+      const item = () => ({ [word(rnd, 2)]: Math.floor(rnd() * 9), [word(rnd, 2)]: { [word(rnd, 2)]: true } });
+      const body = pick(rnd, [() => [item(), item()], () => [[item()]], () => ({ list: [item()] }), () => [item(), null], () => [1, 2]])();
+      bodies.push(JSON.stringify(body));
+      ops.push(post(`https://api.shop.example/api/v1/${res}`, body), post(`https://api.shop.example/api/v1/${res}`, body));
+    }
+    const r = generate(har(ops));
+    expect(compile(r.files["client.ts"]!), bodies.join("\n")).toBe("");
   });
 });
