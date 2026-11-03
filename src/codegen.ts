@@ -340,7 +340,7 @@ function pathExpr(op: PlannedOp): string {
   // Escape for a template literal only when one is emitted: a backslash before "$" in a JSON string is a real backslash
   // ("/odata/$metadata" would request "/odata//$metadata").
   const tpl = (x: string) => x.replace(/[`\\$]/g, "\\$&");
-  const parts = ep.tokens.map((t) => (t.kind === "param" ? `\${enc(params${access(t.name)})}` + tpl(encodeLiteral(t.suffix ?? "")) : tpl(encodeLiteral(t.value))));
+  const parts = ep.tokens.map((t) => (t.kind === "param" ? tpl(encodeLiteral(t.prefix ?? "")) + `\${enc(params${access(t.name)})}` + tpl(encodeLiteral(t.suffix ?? "")) : tpl(encodeLiteral(t.value))));
   return "`/" + parts.join("/") + end + "`";
 }
 

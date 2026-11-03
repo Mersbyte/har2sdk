@@ -12,18 +12,19 @@ import { isDataLike, isIdentity, isIdShaped, isTainted, personWord, type Taint }
 import { isPlural, safeIdentifier, setOwn, singular } from "./words.js";
 
 /** A parameter may carry a fixed file extension after it: `/products/{productId}.json`. */
-export type Token = { kind: "literal"; value: string } | { kind: "param"; name: string; suffix?: string };
+export type Token = { kind: "literal"; value: string } | { kind: "param"; name: string; prefix?: string; suffix?: string };
 
-/** How a token reads in a path template: "users", "{userId}", "{productId}.json". */
+/** How a token reads in a path template: "users", "{userId}", "{productId}.json", "@{handle}". */
 export function tokenText(t: Token): string {
-  return t.kind === "param" ? `{${t.name}}${t.suffix ?? ""}` : t.value;
+  return t.kind === "param" ? `${t.prefix ?? ""}{${t.name}}${t.suffix ?? ""}` : t.value;
 }
 
 /** Does this concrete segment fit the token? */
 export function tokenMatches(t: Token, seg: string | undefined): boolean {
   if (seg === undefined) return false;
   if (t.kind === "literal") return t.value === seg;
-  return !t.suffix || (seg.endsWith(t.suffix) && seg.length > t.suffix.length);
+  const affix = (t.prefix ?? "").length + (t.suffix ?? "").length;
+  return (!t.prefix || seg.startsWith(t.prefix)) && (!t.suffix || seg.endsWith(t.suffix)) && (!affix || seg.length > affix);
 }
 
 export interface PathSample {
@@ -120,12 +121,14 @@ interface Entry {
   hints: Record<number, string>;
   /** File extensions after a parameter (position → ".json"). */
   suffixes: Record<number, string>;
+  /** A sigil before a parameter (position → "@" for /@dorukbey, "~" for /~dorukbey). */
+  prefixes: Record<number, string>;
 }
 
 /** A token's part of a grouping key: literals as themselves, parameters with their extension. */
 function tk(e: Entry, j: number): string {
   const t = e.tokens[j];
-  return t === null ? "\u0001" + (e.suffixes[j] ?? "") : t!;
+  return t === null ? (e.prefixes[j] ?? "") + "\u0001" + (e.suffixes[j] ?? "") : t!;
 }
 
 export interface TemplateOptions {
@@ -181,6 +184,7 @@ export function templatePaths(samples: PathSample[], opts: TemplateOptions = {})
     const forced = forcedPositions(segs, opts.params ?? [], matched);
     const hints: Record<number, string> = {};
     const suffixes: Record<number, string> = {};
+    const prefixes: Record<number, string> = {};
     const tokens: (string | null)[] = [];
     /** The nearest literal before position i (skipping parameters): the collection it belongs to. */
     const collection = (i: number) => {
@@ -208,6 +212,9 @@ export function templatePaths(samples: PathSample[], opts: TemplateOptions = {})
       // (a label) or a person's own (`name`, `displayName`, `first_name` of a profile, kept as a recorded value).
       const named = isIdentity(opts.taint, seg) || (!!prevSeg && personWord(prevSeg) && (!!opts.taint?.labels.has(lower) || !!opts.taint?.values.has(lower)));
       if (opts.taint && isTainted(opts.taint, seg) && (isIdShaped(seg) || (prevSeg && (isPlural(prevSeg) || personWord(prevSeg)) && named && !COMMON_SUBPATHS.has(lower)))) return null;
+      // A value the capture uses to name a person or tenant (a login, an owner) is a member id wherever it sits,
+      // not only after a plural collection word: /u/dorukbey, /in/dorukbey, /api/v1/dorukbey/feed.
+      if (prevSeg && isIdentity(opts.taint, seg) && !COMMON_SUBPATHS.has(lower) && !API_WORD.test(seg)) return null;
       // Strong tenant prefixes (/orgs/acme/repos, /t/acme-corp/projects): the
       // next segment names a tenant, unless it's a sub-collection or a keyword.
       // Weaker words (account, team, site…) need evidence: see shouldMerge.
@@ -256,6 +263,14 @@ export function templatePaths(samples: PathSample[], opts: TemplateOptions = {})
         }
         delete hints[i];
       }
+      // `/@dorukbey`, `/~dorukbey`: a sigil before a person's name; the parameter keeps it.
+      const sigil = !forced.has(i) && /^[@~]./.test(seg) ? seg[0]! : undefined;
+      if (sigil && isIdentity(opts.taint, seg.slice(1))) {
+        tokens.push(null);
+        prefixes[i] = sigil;
+        hints[i] ??= "handle";
+        return;
+      }
       tokens.push(classify(seg, i));
     });
     // Owners echoed in a nested object (/repos/okilic/x → { owner: { login: "okilic" } }) name their parameter.
@@ -263,9 +278,9 @@ export function templatePaths(samples: PathSample[], opts: TemplateOptions = {})
       const f = s.echoFields?.get(seg.toLowerCase());
       if (tokens[i] === null && !hints[i] && f?.includes(".")) hints[i] = f.split(".")[0]!;
     });
-    const key = s.origin + "\u0000" + tokens.map((t, j) => (t === null ? "\u0001" + (suffixes[j] ?? "") : t)).join("/");
+    const key = s.origin + "\u0000" + tokens.map((t, j) => (t === null ? (prefixes[j] ?? "") + "\u0001" + (suffixes[j] ?? "") : t)).join("/");
     let e = entries.get(key);
-    if (!e) entries.set(key, (e = { origin: s.origin, tokens, pathnames: new Set(), keyPaths: new Set(), hasJson: false, echoed: new Set(), langs: new Set(), hints: {}, suffixes }));
+    if (!e) entries.set(key, (e = { origin: s.origin, tokens, pathnames: new Set(), keyPaths: new Set(), hasJson: false, echoed: new Set(), langs: new Set(), hints: {}, suffixes, prefixes }));
     Object.assign(e.hints, hints);
     e.pathnames.add(s.pathname);
     for (const k of s.keyPaths) e.keyPaths.add(k);
@@ -289,10 +304,15 @@ export function templatePaths(samples: PathSample[], opts: TemplateOptions = {})
   // Assign parameter names and build the lookup.
   const out = new Map<string, TemplatedPath>();
   for (const e of list) {
-    const strip = (v: string, i: number) => (e.suffixes[i] && v.endsWith(e.suffixes[i]!) ? v.slice(0, -e.suffixes[i]!.length) : v);
+    const strip = (v: string, i: number) => {
+      if (e.suffixes[i] && v.endsWith(e.suffixes[i]!)) v = v.slice(0, -e.suffixes[i]!.length);
+      return e.prefixes[i] && v.startsWith(e.prefixes[i]!) ? v.slice(e.prefixes[i]!.length) : v;
+    };
     const valuesAt = (i: number) => [...e.pathnames].map((p) => strip(splitPath(p)[i] ?? "", i));
     const names = paramNames(e.tokens, e.hints, valuesAt);
-    const tokens: Token[] = e.tokens.map((t, i) => (t === null ? { kind: "param", name: names[i]!, ...(e.suffixes[i] ? { suffix: e.suffixes[i] } : {}) } : { kind: "literal", value: t }));
+    const tokens: Token[] = e.tokens.map((t, i) =>
+      t === null ? { kind: "param", name: names[i]!, ...(e.prefixes[i] ? { prefix: e.prefixes[i] } : {}), ...(e.suffixes[i] ? { suffix: e.suffixes[i] } : {}) } : { kind: "literal", value: t },
+    );
     const template = "/" + tokens.map(tokenText).join("/");
     for (const pathname of e.pathnames) {
       const segs = splitPath(pathname);
@@ -336,6 +356,7 @@ function mergeSiblings(input: Entry[]): Entry[] {
           langs: new Set(group.flatMap((g) => [...g.langs])),
           hints: { ...Object.assign({}, ...group.map((g) => g.hints)), ...(verdict === "locale" ? { [i]: "locale" } : {}) },
           suffixes: { ...group[0]!.suffixes },
+          prefixes: { ...group[0]!.prefixes },
         };
         // An entry with that exact template may already exist (from pass 1).
         const existing = list.find((e) => !group.includes(e) && e.origin === merged.origin && sameTokens(e, merged));

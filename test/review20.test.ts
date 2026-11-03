@@ -18,6 +18,8 @@
  * FG-05: the default mock replayed them from markup structure: tag and attribute names, `<?…?>` and `<!…>`.
  * A1-04: a person's one-word name (under `name`, `displayName`, `first_name`…) used after a people collection
  *        (`/users/dorukbey`) stayed a literal, so every such app was refused (exit 2); `username` worked.
+ * A1-02: a known username after a prefix that isn't a plural word (`/u/…`, `/in/…`, `/api/v1/…/feed`) or behind a
+ *        sigil (`/@dorukbey`, `/~dorukbey`) stayed a literal: refused (exit 2).
  */
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -629,6 +631,61 @@ describe("A1-04 a person's one-word name after a people collection is a path par
       const r = generateFromHar(capture(`https://api${i}.example`, pick(rnd, keys), v, pick(rnd, paths)(v)));
       expect(r.leaks, v).toEqual([]);
       for (const f of Object.values(r.files)) expect(f.toLowerCase().includes(v), v).toBe(false);
+    }
+  });
+});
+
+// ── A1-02 ──────────────────────────────────────────────────────────────────────
+
+describe("A1-02 a known username is a parameter after any prefix, and behind @ or ~", () => {
+  const API = "https://api.shop.example";
+  const capture = (u: string, path: string) =>
+    har([
+      entry({ url: `${API}/api/v1/orders`, resBody: [{ id: 1, status: "shipped" }] }),
+      entry({ url: `${API}${path}`, resBody: { items: [], total: 0 } }),
+      entry({ url: `${API}/api/v1/me`, resBody: { username: u } }),
+    ]);
+  const SHAPES = ["/@U", "/@U/posts", "/~U", "/u/U", "/u/U/posts", "/in/U", "/api/v1/U/feed", "/api/channel/U/videos", "/api/v1/avatar/U.png", "/r/U"];
+
+  it("the reviewer's shapes: templated, never refused, never written", () => {
+    for (const shape of SHAPES) {
+      const r = generateFromHar(capture("dorukbey", shape.replace("U", "dorukbey")));
+      expect(r.leaks, shape).toEqual([]);
+      for (const f of Object.values(r.files)) expect(f.includes("dorukbey"), shape).toBe(false);
+    }
+    const r = generateFromHar(capture("dorukbey", "/@dorukbey/posts"));
+    expect(r.model.endpoints.map((e) => e.path)).toContain("/@{handle}/posts");
+    expect(Object.keys(JSON.parse(r.files["openapi.json"]!).paths)).toContain("/@{handle}/posts");
+  });
+
+  it("the client keeps the sigil: listPosts({ handle: 'x' }) requests /@x/posts, and it compiles", async () => {
+    const r = generate(capture("dorukbey", "/@dorukbey/posts"));
+    const code = r.files["client.ts"]!;
+    expect(compile(code)).toBe("");
+    const mod = await load(code);
+    const urls: string[] = [];
+    const fetch = async (url: URL) => {
+      urls.push(String(url));
+      return new Response("{}", { headers: { "content-type": "application/json" } });
+    };
+    const client = new mod[r.plan.clientName]({ fetch });
+    const op = r.plan.ops.find((o) => o.ep.path === "/@{handle}/posts")!;
+    await client[op.ep.name]({ handle: "x y" });
+    expect(urls).toEqual([`${API}/@x%20y/posts`]);
+  }, SLOW.timeout);
+
+  it("a word that is no one's name stays a literal after /u/ and @", () => {
+    const r = generateFromHar(capture("dorukbey", "/u/settings"));
+    expect(r.model.endpoints.map((e) => e.path)).toContain("/u/settings");
+  });
+
+  it("generated: random usernames in random prefix shapes are templated and never written", SLOW, () => {
+    const rnd = rng(20_8);
+    for (let i = 0; i < 40; i++) {
+      const u = word(rnd, 3) + pick(rnd, ["", "x", "42"]);
+      const r = generateFromHar(capture(u, pick(rnd, SHAPES).replace("U", u)));
+      expect(r.leaks, u).toEqual([]);
+      for (const f of Object.values(r.files)) expect(f.toLowerCase().includes(u), u).toBe(false);
     }
   });
 });

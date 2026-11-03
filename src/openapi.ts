@@ -287,8 +287,8 @@ function onOrigin(operation: Record<string, unknown>, foreignOrigin: string | un
  * backticks, backslashes, `${` and `*` + `/` from a recorded URL can't close a string or a comment in code a downstream
  * generator writes from the key. `$`, `@`, `:` and the like stay as recorded (`/odata/$metadata`).
  */
-function specPath(ep: { path: string; trailingSlash?: true; tokens: readonly ({ kind: "literal"; value: string } | { kind: "param"; name: string; suffix?: string })[] }): string {
+function specPath(ep: { path: string; trailingSlash?: true; tokens: readonly ({ kind: "literal"; value: string } | { kind: "param"; name: string; prefix?: string; suffix?: string })[] }): string {
   const enc = (x: string) => encodeURIComponent(x).replace(/%(40|3A|21|24|26|28|29|2B|2C|3B|3D)/gi, (m) => decodeURIComponent(m)).replace(/['*]/g, (c) => (c === "'" ? "%27" : "%2A"));
-  if (!ep.tokens.some((t) => { const x = t.kind === "literal" ? t.value : (t.suffix ?? ""); return enc(x) !== x; })) return ep.path;
-  return "/" + ep.tokens.map((t) => (t.kind === "param" ? `{${t.name}}${enc(t.suffix ?? "")}` : enc(t.value))).join("/") + (ep.trailingSlash ? "/" : "");
+  if (!ep.tokens.some((t) => { const x = t.kind === "literal" ? t.value : (t.prefix ?? "") + (t.suffix ?? ""); return enc(x) !== x; })) return ep.path;
+  return "/" + ep.tokens.map((t) => (t.kind === "param" ? `${enc(t.prefix ?? "")}{${t.name}}${enc(t.suffix ?? "")}` : enc(t.value))).join("/") + (ep.trailingSlash ? "/" : "");
 }
