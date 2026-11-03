@@ -134,6 +134,11 @@ export interface AuthInfo {
 export interface ApiModel {
   source?: string;
   primaryOrigin: string;
+  /**
+   * With more than one origin: which one became the client's default address and why. A crafted capture can
+   * make an attacker's origin look like the API, so this is shown first, not among the warnings.
+   */
+  primaryOriginWarning?: string;
   origins: { origin: string; count: number }[];
   stats: { entries: number; kept: number; dropped: Partial<Record<DropReason, number>> };
   auth: AuthInfo;
@@ -218,6 +223,14 @@ export function analyzeExchanges(all: Exchange[], opts: AnalyzeOptions = {}): Ap
   const primaryOrigin = origins[0]?.origin ?? "";
   const multiOrigin = origins.length > 1;
   const alsoCredentialed = origins.slice(1).filter((o) => (originAuth.get(o.origin) ?? 0) > 0);
+  let primaryOriginWarning: string | undefined;
+  if (multiOrigin) {
+    const why = (originAuth.get(primaryOrigin) ?? 0) > 0 ? "the origin the app sent its credentials to" : "the origin with the most endpoints (no credentials were recorded)";
+    const others = origins.slice(1).map((o) => o.origin);
+    primaryOriginWarning =
+      `The client's default address (baseUrl) is ${primaryOrigin}: ${why}. The capture also called ${others.slice(0, 5).join(", ")}${others.length > 5 ? ` and ${others.length - 5} more` : ""}. ` +
+      `If ${primaryOrigin} isn't the API you meant, the capture may have been crafted: set --base-url (or \`baseUrl\` in code) before giving the client real credentials.`;
+  }
   if (alsoCredentialed.length) {
     warnings.push(
       `Credentials were also recorded on ${alsoCredentialed.map((o) => o.origin).join(", ")}. The client sends yours only to baseUrl (${primaryOrigin}); list another origin in \`trustedOrigins\` if it is yours too.`,
@@ -284,6 +297,7 @@ export function analyzeExchanges(all: Exchange[], opts: AnalyzeOptions = {}): Ap
   return {
     source: opts.source,
     primaryOrigin,
+    ...(primaryOriginWarning ? { primaryOriginWarning } : {}),
     origins,
     stats: { entries: all.length, kept: kept.length, dropped },
     auth: detectAuth(kept, taint),

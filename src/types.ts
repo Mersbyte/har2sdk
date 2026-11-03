@@ -264,10 +264,12 @@ export class TypeRegistry {
       const pairs = props.map((p) => [nt.props.find((q) => q.name === p.name)!, p] as const);
       const numeric = (x: TypeNode, y: TypeNode) => (x.k === "integer" || x.k === "number") && (y.k === "integer" || y.k === "number");
       const same = (x: TypeNode, y: TypeNode) => this.typeKey(x) === this.typeKey(y);
-      if (!pairs.every(([a, b]) => same(a.type, b.type) || isVague(a.type) || isVague(b.type) || numeric(a.type, b.type))) continue;
+      // An empty list or object says little, but it still says list or object: `[]` fits `Item[]`, never `number`.
+      const fills = (vague: TypeNode, other: TypeNode) => isVague(vague) && vagueFits(vague, other);
+      if (!pairs.every(([a, b]) => same(a.type, b.type) || fills(a.type, b.type) || fills(b.type, a.type) || numeric(a.type, b.type))) continue;
       if (pairs.every(([a, b]) => same(a.type, b.type))) continue; // exact match is handled by key
       for (const [a, b] of pairs) {
-        if (isVague(a.type) && !isVague(b.type)) a.type = b.type;
+        if (fills(a.type, b.type) && !isVague(b.type)) a.type = b.type;
         else if (numeric(a.type, b.type) && b.type.k === "number") a.type = { k: "number" };
       }
       return nt;
@@ -392,6 +394,13 @@ function namesRelated(a: string, b: string): boolean {
   return wa.some((w) => wb.has(w));
 }
 
+/** Can a vague type (never seen, `[]`, `{}`) stand for `other`? Only a never-seen value fits any kind. */
+function vagueFits(vague: TypeNode, other: TypeNode): boolean {
+  if (vague.k === "unknown") return true;
+  if (vague.k === "array") return other.k === "array";
+  return other.k === "ref" || other.k === "record" || other.k === "map";
+}
+
 function isVague(t: TypeNode): boolean {
   return t.k === "unknown" || (t.k === "array" && t.items.k === "unknown") || t.k === "record" || (t.k === "map" && t.values.k === "unknown");
 }
@@ -448,6 +457,9 @@ export function printTs(t: TypeNode): string {
   }
 }
 
+/** The members TypeScript's `Object` interface declares (what every object inherits). */
+const TS_OBJECT_MEMBERS = new Set(["constructor", "toString", "toLocaleString", "valueOf", "hasOwnProperty", "isPrototypeOf", "propertyIsEnumerable"]);
+
 export function printTsInterface(nt: NamedType, doc?: string): string {
   const lines: string[] = [];
   if (doc) lines.push(`/** ${doc} */`);
@@ -459,7 +471,10 @@ export function printTsInterface(nt: NamedType, doc?: string): string {
   for (const p of nt.props) {
     const fmt = formatOf(p.type);
     if (fmt) lines.push(`  /** @format ${fmt} */`);
-    lines.push(`  ${propertyKey(p.name)}${p.optional ? "?" : ""}: ${printTs(p.type)};`);
+    // An absent optional `toString` / `constructor` is still there, inherited from Object.prototype: the type
+    // must allow the inherited member, or a recorded object without the key isn't assignable.
+    const inherited = p.optional && TS_OBJECT_MEMBERS.has(p.name) ? ` | Object[${JSON.stringify(p.name)}]` : "";
+    lines.push(`  ${propertyKey(p.name)}${p.optional ? "?" : ""}: ${printTs(p.type)}${inherited};`);
   }
   lines.push("}");
   return lines.join("\n");
@@ -514,15 +529,22 @@ export function toJsonSchema(t: TypeNode, refPrefix = "#/components/schemas/"): 
   }
 }
 
+const REF_KEYWORDS = new Set(["$ref", "$dynamicRef", "$recursiveRef"]);
+
 export function namedToJsonSchema(nt: NamedType, refPrefix = "#/components/schemas/"): JsonSchema {
   if (nt.aliasOf) return { $ref: refPrefix + nt.aliasOf };
   const properties: Record<string, JsonSchema> = {};
+  const patternProperties: Record<string, JsonSchema> = {};
   const required: string[] = [];
   for (const p of nt.props) {
-    setOwn(properties, p.name, toJsonSchema(p.type, refPrefix));
+    // A recorded key named like a reference keyword (`$ref`) would read as a reference to tools that look for
+    // that key anywhere (openapi-schema-validator fails on it). An exact-match pattern describes the same key.
+    if (REF_KEYWORDS.has(p.name)) setOwn(patternProperties, "^" + p.name.replace(/\$/g, "\\$") + "$", toJsonSchema(p.type, refPrefix));
+    else setOwn(properties, p.name, toJsonSchema(p.type, refPrefix));
     if (!p.optional) required.push(p.name);
   }
   const s: JsonSchema = { type: "object", properties };
+  if (Object.keys(patternProperties).length) s.patternProperties = patternProperties;
   if (required.length) s.required = required;
   return s;
 }

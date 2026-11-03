@@ -3,7 +3,7 @@
  * OpenAPI emitters: one TypeRegistry, and for each endpoint the TypeNodes for
  * its params, body and success response.
  */
-import { applyAnnotations, clientNameFor, isValidClientName, type Annotations } from "./annotations.js";
+import { applyAnnotations, clientNameFor, isValidClientName, isValidTypeName, type Annotations } from "./annotations.js";
 import { mergeShapes, emptyShape, type Shape } from "./infer.js";
 import type { ApiModel, Endpoint } from "./model.js";
 import { renameRefs, TypeRegistry, type NamedType, type TypeNode } from "./types.js";
@@ -292,7 +292,11 @@ function renameTypes(registry: TypeRegistry, ops: PlannedOp[], map: Record<strin
       continue;
     }
     // Two types renamed to one name would merge silently (interfaces with one name merge).
-    if (!isIdentifier(to) || registry.isTaken(to) || [...rename.values()].includes(to)) {
+    if (!isValidTypeName(to)) {
+      warnings.push(`Can't rename type "${from}" to "${String(to).slice(0, 40)}": not an identifier, a reserved word, or a name the client or TypeScript already uses.`);
+      continue;
+    }
+    if (registry.isTaken(to) || [...rename.values()].includes(to)) {
       warnings.push(`Can't rename type "${from}" to "${to}" (invalid or already used).`);
       continue;
     }

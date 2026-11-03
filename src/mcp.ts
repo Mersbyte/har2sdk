@@ -184,7 +184,9 @@ export function createMcpServer(): McpServer {
         // The words the leak guard can't judge, for the user to check (redacted like everything else here).
         const words = renderPathWords(plan, literalPathWords(plan, exchanges), { limit: 20, for: "mcp" });
         const section = words.length ? `\n\n${scrubText(words.join("\n"), model.taint)}` : "";
-        return text(renderEndpointList(plan) + section + `\n\nNext: inspect_endpoint for anything unclear, then generate_sdk with annotations.`);
+        // First, as its own labelled field: which origin would get the user's credentials, and why.
+        const origin = model.primaryOriginWarning ? `primaryOriginWarning: ${scrubText(model.primaryOriginWarning, model.taint)}\n\n` : "";
+        return text(origin + renderEndpointList(plan) + section + `\n\nNext: inspect_endpoint for anything unclear, then generate_sdk with annotations.`);
       } catch (err) {
         return fail(String((err as Error).message ?? err));
       }
@@ -314,6 +316,7 @@ export function createMcpServer(): McpServer {
             `${result.plan.clientName} methods:`,
             ...result.plan.ops.map((o) => `- ${signature(o)}`),
           ];
+          if (model.primaryOriginWarning && base_url === undefined) lines.splice(1, 0, `primaryOriginWarning: ${model.primaryOriginWarning}`, "");
           if (result.warnings.length) lines.push("", "Warnings:", ...result.warnings.map((w) => `- ${w}`));
           const words = renderPathWords(result.plan, literalPathWords(result.plan, exchanges), { limit: 20, for: "mcp" });
           if (words.length) lines.push("", ...words);

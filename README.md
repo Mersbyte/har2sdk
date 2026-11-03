@@ -122,7 +122,7 @@ HAR files contain live session cookies, tokens and often other people's data. ha
 
 Exit status 0 means the guard found nothing it could match, not that nothing leaked. A value with **no evidence** in the parts of the capture the guard reads (a word used once as a path segment that nothing else names) can't be recognised, one-word names of things (a category `"Books"`) are treated as vocabulary, and a value the app rewrites in a way the guard doesn't model (see [Limitations](#limitations)) is missed. So that you can judge such words yourself, the CLI (after the files it wrote), `har2sdk inspect` (and `inspect --json`, as `pathWords`) and the MCP `analyze_har` and `generate_sdk` responses list every path word written into `client.ts`, the ones seen in only one recorded path first; check that list before publishing generated code, and make a word that is data a parameter with `--param`. **Check `har2sdk inspect` and the generated files yourself before committing or publishing them.** Details, and exactly what is and isn't collected: [SECURITY.md](SECURITY.md).
 
-It's tested with the inputs of twenty-two review rounds (`test/review*.test.ts`) and a generated privacy test that builds a random person and hides them in 30 kinds of places in a random capture, then checks every output, including a real MCP session, the CLI's `inspect --json` and every mock response (30 seeds in CI; the long run of 1,000 seeds passes).
+It's tested with the inputs of twenty-three review rounds (`test/review*.test.ts`) and a generated privacy test that builds a random person and hides them in 30 kinds of places in a random capture, then checks every output, including a real MCP session, the CLI's `inspect --json` and every mock response (30 seeds in CI; the long run of 1,000 seeds passes).
 
 **How it was built and checked.** har2sdk was written with an AI coding assistant (Claude), and every review so far was done by AI tools (Claude Code, OpenAI Codex) and GitHub's CodeQL scanner. It has not had an independent audit by a security professional. Each review found real problems, and later ones still did, so treat the leak guard as a safety net that lowers the risk, not as a guarantee, and please [report](SECURITY.md#reporting-a-problem) anything it misses.
 
@@ -130,7 +130,7 @@ It's tested with the inputs of twenty-two review rounds (`test/review*.test.ts`)
 
 ## Better names with Claude — no API key
 
-The engine is deterministic; naming is where a language model helps. What a model sees: endpoint paths (ids already `{params}`), parameter names, inferred types and GraphQL documents, with whatever the leak guard matches replaced by `<redacted>` — the same matching as above, with the same gaps. Accepted names are saved to `har2sdk.annotations.json`, so later runs are reproducible.
+The engine is deterministic; naming is where a language model helps. What a model sees: endpoint paths (ids already `{params}`), parameter names, inferred types with their property keys and enum values, host names, and GraphQL operation names and documents, with whatever the leak guard matches replaced by `<redacted>` — the same matching as above, with the same gaps. All of it comes from the capture and enters the model's context; the prompt and the MCP tools mark it as untrusted data, not instructions (see SECURITY.md, *Limits*). Accepted names are saved to `har2sdk.annotations.json`, so later runs are reproducible.
 
 **MCP server** (Claude Code, Claude Desktop, Cursor, any MCP client):
 
@@ -252,8 +252,9 @@ The OpenAPI tools pair well with a generator such as [orval](https://orval.dev) 
 - Heuristics can mis-template paths. Check `har2sdk inspect`; fix with `--param` or annotations.
 - The leak guard doesn't catch everything. Known gaps: values with no evidence in the capture; one-word names used as dictionary keys (`{ "zeynep": 10 }` becomes a property name); a recorded value the app rewrites before using it — decorated (`🌸zkaya🌸`), with invisible characters, in another Unicode normalization (NFD), or inside a longer compound name (`seen_by_zeynep`); names inside an encrypted or split JWT; GraphQL enum literals, aliases and fragment names; three-letter first names in cased alphabets ("Ali"); values over 4,000 characters; evidence past the first 2,000 items of an array, 64 levels of nesting, 200 KB of a text body or 5,000 CSV rows. See SECURITY.md, *Limits*.
 - Not modelled yet: APIs multiplexed through a query parameter (`index.php?route=…`), protobuf / gRPC-web, WebSockets, Server-Sent Events, request chains (fetch a CSRF token, then call — pass such headers with `headers: async () => ({ … })`).
+- A response with a 2xx status and a body that should be JSON but doesn't parse is returned as its raw text, not thrown: check the type at run time if a server can send that.
 - The same method + path on two origins: the SDK has both, `openapi.json` keeps one (with a warning). JSON-RPC over one URL is one OpenAPI operation with a body variant per method.
-- Large captures are read as a stream, but every request is kept in memory. Synthetic capture (API JSON, base64 images, JS bundles), Node 22, 4 vCPU, `har2sdk capture.har`:
+- Large captures are read as a stream, but every request is kept in memory. Example measurements on one machine (synthetic capture of API JSON, base64 images and JS bundles; Node 22, 4 vCPU; `har2sdk capture.har`), not re-measured since 0.6.0; times and memory depend on the machine and the capture:
 
   | capture | 0.5.0 | 0.6.0 |
   |---|---|---|

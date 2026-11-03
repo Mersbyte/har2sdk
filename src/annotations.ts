@@ -135,7 +135,11 @@ const RESERVED_CLASS_NAMES = new Set(
   (
     "ApiError GraphQLError RpcError ClientOptions RequestOptions QueryValue DEFAULT_HEADERS DEFAULT_BASE_URL URL URLSearchParams " +
     "Error Object Array String Number Boolean Promise Record Response Request Headers FormData Blob JSON Map Set Date Symbol " +
-    "Parameters NonNullable AbortSignal globalThis fetch enc"
+    "Parameters NonNullable AbortSignal globalThis fetch enc hasPath " +
+    // TypeScript's own type names: `class string {}` doesn't compile.
+    "any unknown never void undefined null object string number boolean symbol bigint " +
+    // `arguments` / `eval` aren't allowed as names in a module; an export named `then` makes the module a thenable.
+    "arguments eval then"
   ).split(" "),
 );
 const RESERVED_WORDS = new Set("break case catch class const continue debugger default delete do else enum export extends false finally for function if import in instanceof new null return super switch this throw true try typeof var void while with let static yield await implements interface package private protected public".split(" "));
@@ -143,6 +147,9 @@ const RESERVED_WORDS = new Set("break case catch class const continue debugger d
 export function isValidClientName(name: string): boolean {
   return isIdentifier(name) && !RESERVED_CLASS_NAMES.has(name) && !RESERVED_WORDS.has(name);
 }
+
+/** A type name the generated module can declare: the same rules as for the client class. */
+export const isValidTypeName = isValidClientName;
 
 export function clientNameFor(model: ApiModel, ann?: Annotations): string {
   if (ann?.clientName && isValidClientName(ann.clientName)) return ann.clientName;
