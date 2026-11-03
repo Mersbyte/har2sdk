@@ -319,10 +319,17 @@ function renameTypes(registry: TypeRegistry, ops: PlannedOp[], map: Record<strin
 /** Throws unless `url` is an absolute http(s) URL: it becomes the SDK's default base URL. */
 export function checkBaseUrl(url: string): void {
   let ok = false;
+  let userinfo = false;
   try {
-    ok = /^https?:$/.test(new URL(url).protocol);
+    const u = new URL(url);
+    ok = /^https?:$/.test(u.protocol);
+    userinfo = !!(u.username || u.password);
   } catch {
     ok = false;
+  }
+  // `https://user:pass@host` would write the password into client.ts, which people commit. Not echoed back either.
+  if (ok && userinfo) {
+    throw new Error(`Invalid base URL (--base-url): it contains a user name or password, which would be written into client.ts. Pass credentials to the client at run time instead (basicAuth, token).`);
   }
   if (!ok) throw new Error(`Invalid base URL ${JSON.stringify(url.slice(0, 80))} (--base-url): use an absolute http(s) URL such as https://api.example.com.`);
 }

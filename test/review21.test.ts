@@ -1,6 +1,6 @@
 /**
  * Twenty-first review (v0.6.16): a security pass by another AI assistant against the published 0.6.16.
- * Four findings fixed here, each reproduced with the reviewer's input first. One describe block per finding.
+ * Five findings fixed here, each reproduced with the reviewer's input first. One describe block per finding.
  *
  * K1: MCP `generate_sdk` accepted any `base_url`. Text in a capture can steer a model, and the client sends
  *     the user's token to its base URL.
@@ -9,6 +9,7 @@
  * K3: `mock --raw` allowed CORS from every recorded origin, third parties included, so such a site could read
  *     the unscrubbed recorded bodies from the user's browser.
  * K4: the MCP server read a link named `capture.har` whatever its target was ("only reads .har / .json").
+ * K5: `--base-url https://u:p@host` wrote the password into `client.ts` (from a later version comparison).
  */
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
@@ -222,5 +223,33 @@ describe("K4 the MCP server reads a link only if its target is a capture", () =>
     symlinkSync(target, link);
     const res = await call("analyze_har", { har_path: link });
     expect(res.isError).toBe(false);
+  });
+});
+
+// ── K5 ─────────────────────────────────────────────────────────────────────────
+
+describe("K5 a base URL with a user name or password is refused (it would be written into client.ts)", () => {
+  it("the reviewer's `--base-url https://u:p@host`: refused, and the password isn't echoed", () => {
+    let message = "";
+    try {
+      generateFromHar(twoOrigins, { baseUrl: "https://u:s3cr3tpass@api.acme.test" });
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toMatch(/user name or password/);
+    expect(message).not.toContain("s3cr3tpass");
+  });
+
+  it("a plain base URL with a path is still fine", () => {
+    expect(generateFromHar(twoOrigins, { baseUrl: "https://api.acme.test/v2" }).files["client.ts"]).toContain("https://api.acme.test/v2");
+  });
+
+  it("generated: any userinfo is refused", () => {
+    const rnd = rng(21_5);
+    for (let i = 0; i < 30; i++) {
+      const user = word(rnd, 2);
+      const url = rnd() < 0.5 ? `https://${user}@api.acme.test` : `http://${user}:${word(rnd, 3)}@localhost:${3000 + i}`;
+      expect(() => generateFromHar(twoOrigins, { baseUrl: url }), url).toThrow(/user name or password/);
+    }
   });
 });
