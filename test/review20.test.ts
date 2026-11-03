@@ -35,6 +35,7 @@
  *        (a dropped request's path, a literal path segment), next to "please report it".
  * FG-03: `mock --bind` with anything but loopback accepted every Host header, so a DNS-rebinding page could read
  *        the mock; the warning only mentioned the local network.
+ * I-01: the README's MCP setup (`npx -y har2sdk mcp`) was unpinned: every editor start could run a newer release.
  */
 import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -993,5 +994,19 @@ describe("FG-03 mock --bind keeps the Host check: a rebound name gets 403", () =
     } finally {
       m.stop();
     }
+  });
+});
+
+// ── I-01 ───────────────────────────────────────────────────────────────────────
+
+describe("I-01 the README's MCP setup pins the released version", () => {
+  it("every npx har2sdk … mcp line and config names har2sdk@<package.json version>", () => {
+    const readme = readFileSync(join(ROOT, "README.md"), "utf8");
+    const version = (JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as { version: string }).version;
+    const shell = [...readme.matchAll(/npx -y (har2sdk(?:@[\w.-]+)?) mcp/g)].map((m) => m[1]);
+    const json = [...readme.matchAll(/"(har2sdk(?:@[\w.-]+)?)", "mcp"/g)].map((m) => m[1]);
+    expect(shell.length).toBeGreaterThan(0);
+    expect(json.length).toBeGreaterThan(1);
+    for (const spec of [...shell, ...json]) expect(spec).toBe(`har2sdk@${version}`);
   });
 });
