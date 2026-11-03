@@ -30,6 +30,7 @@
  * C1-05: an XML / CSV / SOAP request body was sent as `text/plain`, not the recorded media type.
  * E-04: MCP `generate_sdk` with no matching endpoint (a typo in `hosts`) replaced a working client.ts with an
  *        empty one and reported success.
+ * H-04: reading `<meta name=… content=…>` pairs was quadratic on unclosed tags: seconds per 200 KB HTML body.
  */
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -44,7 +45,7 @@ import { Validator } from "@seriousme/openapi-schema-validator";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { assertUniqueDeclarations } from "../src/codegen.js";
 import { generateFromHar } from "../src/index.js";
-import { isJsonPrefix } from "../src/leak.js";
+import { isJsonPrefix, namedValues } from "../src/leak.js";
 import { createMcpServer } from "../src/mcp.js";
 import { listenMock } from "../src/mock.js";
 import { ROOT, entry, har } from "./helpers.js";
@@ -862,6 +863,42 @@ describe("E-04 generate_sdk with no matching endpoint fails and keeps the existi
       const list = [rnd() < 0.5 ? hosts[0]! : `${word(rnd)}.test`, ...(rnd() < 0.5 ? [hosts[1]!] : [])];
       const res = await call("generate_sdk", { har_path: path, out_dir: join(dir, `out${i}`), hosts: list });
       expect(res.isError, list.join()).toBe(!list.some((h) => hosts.includes(h)));
+    }
+  });
+});
+
+// ── H-04 ───────────────────────────────────────────────────────────────────────
+
+describe("H-04 named values in markup are read in linear time, with the same result", () => {
+  /** The 0.6.15 reading, for comparison. */
+  const reference = (markup: string): [string, string][] => {
+    const out: [string, string][] = [];
+    for (const m of markup.matchAll(/<(?:meta|input|param|data|option|button|textarea|output|select)\b[^>]*>/gi)) {
+      const attrs = new Map<string, string>();
+      for (const a of m[0].matchAll(/(?<![\w:.-])([\w:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g)) attrs.set(a[1]!.toLowerCase(), a[2] ?? a[3] ?? a[4] ?? "");
+      const name = attrs.get("name") ?? attrs.get("property") ?? attrs.get("itemprop");
+      const value = attrs.get("content") ?? attrs.get("value");
+      if (name && value) out.push([name, value]);
+    }
+    return out;
+  };
+
+  it("the reviewer's body: 200 KB of unclosed <meta takes milliseconds", () => {
+    const t = performance.now();
+    expect(namedValues("<html>" + "<meta ".repeat(33_334))).toEqual([]);
+    const tail = '<input a=b '.repeat(18_000) + '<meta name="user-login" content="okilic">';
+    const got = namedValues(tail);
+    expect(performance.now() - t).toBeLessThan(500);
+    expect(got).toEqual(reference(tail));
+  });
+
+  it("generated: random tag soup gives the same pairs as the old regex", () => {
+    const rnd = rng(20_12);
+    const parts = ["<meta", "<input", "<option", " name=", ' name="user-login"', " content=", ' value="okilic"', " a=b", " ", ">", '"', "'", "<p>", "x"];
+    for (let i = 0; i < 300; i++) {
+      let m = "";
+      for (let j = 0; j < 40; j++) m += pick(rnd, parts);
+      expect(namedValues(m), m).toEqual(reference(m));
     }
   });
 });

@@ -967,18 +967,25 @@ function unescapeJs(body: string): string {
   return out;
 }
 
-const NAMED_VALUE_TAG = /<(?:meta|input|param|data|option|button|textarea|output|select)\b[^>]*>/gi;
+/** The head of a tag that names a value. Its end is found with indexOf: `[^>]*>` from every unclosed head was quadratic. */
+const NAMED_VALUE_TAG = /<(?:meta|input|param|data|option|button|textarea|output|select)\b/gi;
 // Anchored at the start of a name (nothing of its own kind before it): a long name without "=" is tried once,
 // not again from each of its characters.
 const TAG_ATTRIBUTE = /(?<![\w:.-])([\w:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g;
 
 /** `<meta name="user-login" content="okilic">`, `<input name="username" value="okilic">`: [name, value] pairs. */
-function namedValues(markup: string): [string, string][] {
+export function namedValues(markup: string): [string, string][] {
   const out: [string, string][] = [];
-  for (const m of markup.matchAll(NAMED_VALUE_TAG)) {
+  const head = new RegExp(NAMED_VALUE_TAG.source, "gi");
+  for (let m = head.exec(markup); m; m = head.exec(markup)) {
     if (out.length >= 5000) break;
+    // The same tags as /<head\b[^>]*>/: up to the next ">". With none left, no later tag can close either.
+    const end = markup.indexOf(">", m.index);
+    if (end < 0) break;
+    const tag = markup.slice(m.index, end + 1);
+    head.lastIndex = end + 1;
     const attrs = new Map<string, string>();
-    for (const a of m[0].matchAll(TAG_ATTRIBUTE)) attrs.set(a[1]!.toLowerCase(), decodeEntities(a[2] ?? a[3] ?? a[4] ?? ""));
+    for (const a of tag.matchAll(TAG_ATTRIBUTE)) attrs.set(a[1]!.toLowerCase(), decodeEntities(a[2] ?? a[3] ?? a[4] ?? ""));
     const name = attrs.get("name") ?? attrs.get("property") ?? attrs.get("itemprop");
     const value = attrs.get("content") ?? attrs.get("value");
     if (name && value) out.push([name, value]);
