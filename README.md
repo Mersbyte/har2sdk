@@ -118,11 +118,11 @@ HAR files contain live session cookies, tokens and often other people's data. ha
 - **runs on your machine.** The CLI makes no network requests.
 - **keeps recorded values out of the generated files.** What *is* taken from the capture: the base URL, path segments and property names judged to be names of things, version/platform header values, vocabulary enum values (`"shipped"`), and GraphQL documents with their data-carrying values lifted into variables.
 - **has a leak guard — a heuristic, not a guarantee.** It links the output back to the capture by matching strings, so it only catches what it can match. Before generating, it collects every recorded value that looks like data (ids, emails, phone numbers, free text, values under personal, secret or id keys in five languages, and names recorded in parts such as `firstName` + `lastName`) and every value the capture uses as a user or tenant name (under `login`, `owner`, `reviewer`… and their Turkish, German, Spanish and French equivalents, or in `x-user` headers — `okilic` too, in any spelling). The generator consults that set for every path literal, enum member, property name and header default. Then every output is scanned: if `client.ts` or `openapi.json` contains a recorded value, **nothing is written** (exit status 2, masked previews; `--allow-leaks` overrides). The chat prompt, MCP responses and `inspect --json` get such values replaced by `<redacted>`.
-- **serves fake data from the mock** (and `--examples`): same shape, consistent fake ids, masked names, emails, addresses and free text — for JSON, XML, CSV and text bodies. The mock listens on `127.0.0.1`, rejects foreign `Host` headers (DNS rebinding) and allows CORS only from `localhost` and the recorded origins. `--raw` serves the recorded bodies unscrubbed.
+- **serves fake data from the mock** (and `--examples`): same shape, consistent fake ids, masked names, emails, addresses and free text — for JSON, XML, CSV and text bodies. The mock listens on `127.0.0.1`, rejects foreign `Host` headers (DNS rebinding) and allows CORS only from `localhost` and the recorded origins. `--raw` serves the recorded bodies unscrubbed, and then allows CORS from `localhost` only: a recorded origin can be a third party.
 
 Exit status 0 means the guard found nothing it could match, not that nothing leaked. A value with **no evidence** in the parts of the capture the guard reads (a word used once as a path segment that nothing else names) can't be recognised, one-word names of things (a category `"Books"`) are treated as vocabulary, and a value the app rewrites in a way the guard doesn't model (see [Limitations](#limitations)) is missed. So that you can judge such words yourself, the CLI (after the files it wrote), `har2sdk inspect` (and `inspect --json`, as `pathWords`) and the MCP `analyze_har` and `generate_sdk` responses list every path word written into `client.ts`, the ones seen in only one recorded path first; check that list before publishing generated code, and make a word that is data a parameter with `--param`. **Check `har2sdk inspect` and the generated files yourself before committing or publishing them.** Details, and exactly what is and isn't collected: [SECURITY.md](SECURITY.md).
 
-It's tested with the inputs of twenty review rounds (`test/review*.test.ts`) and a generated privacy test that builds a random person and hides them in 30 kinds of places in a random capture, then checks every output, including a real MCP session, the CLI's `inspect --json` and every mock response (30 seeds in CI; the long run of 1,000 seeds passes).
+It's tested with the inputs of twenty-one review rounds (`test/review*.test.ts`) and a generated privacy test that builds a random person and hides them in 30 kinds of places in a random capture, then checks every output, including a real MCP session, the CLI's `inspect --json` and every mock response (30 seeds in CI; the long run of 1,000 seeds passes).
 
 **How it was built and checked.** har2sdk was written with an AI coding assistant (Claude), and every review so far was done by AI tools (Claude Code, OpenAI Codex) and GitHub's CodeQL scanner. It has not had an independent audit by a security professional. Each review found real problems, and later ones still did, so treat the leak guard as a safety net that lowers the risk, not as a guarantee, and please [report](SECURITY.md#reporting-a-problem) anything it misses.
 
@@ -135,7 +135,7 @@ The engine is deterministic; naming is where a language model helps. What a mode
 **MCP server** (Claude Code, Claude Desktop, Cursor, any MCP client):
 
 ```bash
-claude mcp add har2sdk -- npx -y har2sdk@0.6.16 mcp
+claude mcp add har2sdk -- npx -y har2sdk@0.6.17 mcp
 ```
 
 The version is pinned on purpose: an MCP server started with `npx` runs again every time your editor starts, and an unpinned one would download and run whatever release is newest then, without a review step. Change the version when you choose to update.
@@ -145,12 +145,12 @@ The version is pinned on purpose: an MCP server started with `npx` runs again ev
 ```json
 {
   "mcpServers": {
-    "har2sdk": { "command": "npx", "args": ["-y", "har2sdk@0.6.16", "mcp"] }
+    "har2sdk": { "command": "npx", "args": ["-y", "har2sdk@0.6.17", "mcp"] }
   }
 }
 ```
 
-On Windows, if the server doesn't start, use `"command": "cmd", "args": ["/c", "npx", "-y", "har2sdk@0.6.16", "mcp"]`.
+On Windows, if the server doesn't start, use `"command": "cmd", "args": ["/c", "npx", "-y", "har2sdk@0.6.17", "mcp"]`.
 </details>
 
 Then ask: *"Turn ~/Downloads/capture.har into an SDK with great names."* Claude calls `analyze_har`, `inspect_endpoint` and `generate_sdk`. The server writes to `har2sdk-out` next to the HAR file; `out_dir` must stay inside the HAR's folder, the server's working directory (not `/` or your home folder) or the temp directory. It never writes through a symbolic link (a linked `har2sdk-out` or `har2sdk.annotations.json` is an error).
@@ -250,7 +250,7 @@ The OpenAPI tools pair well with a generator such as [orval](https://orval.dev) 
 
 - Types describe what was **observed**: fields that never showed up are missing, fields seen once may look required. Record more, or pass several HARs.
 - Heuristics can mis-template paths. Check `har2sdk inspect`; fix with `--param` or annotations.
-- The leak guard doesn't catch everything. Known gaps: values with no evidence in the capture; one-word names used as dictionary keys (`{ "zeynep": 10 }` becomes a property name); a recorded value the app rewrites before using it — decorated (`🌸zkaya🌸`), with invisible characters, in another Unicode normalization (NFD), or inside a longer compound name (`seen_by_zeynep`); names that appear only inside a JWT payload; GraphQL enum literals, aliases and fragment names; three-letter first names in cased alphabets ("Ali"); values over 4,000 characters; evidence past the first 2,000 items of an array, 64 levels of nesting, 200 KB of a text body or 5,000 CSV rows. See SECURITY.md, *Limits*.
+- The leak guard doesn't catch everything. Known gaps: values with no evidence in the capture; one-word names used as dictionary keys (`{ "zeynep": 10 }` becomes a property name); a recorded value the app rewrites before using it — decorated (`🌸zkaya🌸`), with invisible characters, in another Unicode normalization (NFD), or inside a longer compound name (`seen_by_zeynep`); names inside an encrypted or split JWT; GraphQL enum literals, aliases and fragment names; three-letter first names in cased alphabets ("Ali"); values over 4,000 characters; evidence past the first 2,000 items of an array, 64 levels of nesting, 200 KB of a text body or 5,000 CSV rows. See SECURITY.md, *Limits*.
 - Not modelled yet: APIs multiplexed through a query parameter (`index.php?route=…`), protobuf / gRPC-web, WebSockets, Server-Sent Events, request chains (fetch a CSRF token, then call — pass such headers with `headers: async () => ({ … })`).
 - The same method + path on two origins: the SDK has both, `openapi.json` keeps one (with a warning). JSON-RPC over one URL is one OpenAPI operation with a body variant per method.
 - Large captures are read as a stream, but every request is kept in memory. Synthetic capture (API JSON, base64 images, JS bundles), Node 22, 4 vCPU, `har2sdk capture.har`:

@@ -363,13 +363,13 @@ describe("E7 the numbers in README and LAUNCH.md match the repo", () => {
   // The sites, plus the three places every capture has: the profile, the members list and the headers.
   const kinds = [...sites.matchAll(/^ {4}[a-zA-Z]+: \(\) => \{/gm)].length + 3;
   const rounds = readdirSync(join(ROOT, "test")).filter((f) => /^review\d*\.test\.ts$/.test(f)).length;
-  const words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty"];
+  const words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty", "twenty-one"];
 
   for (const file of ["README.md", "docs/LAUNCH.md"]) {
     it(file, () => {
       const text = repoText(file);
       for (const m of text.matchAll(/(\d+) kinds of (?:places|placements)/g)) expect(Number(m[1])).toBe(kinds);
-      for (const m of text.matchAll(/\b(\w+) review rounds/gi)) expect(m[1]!.toLowerCase()).toBe(words[rounds]);
+      for (const m of text.matchAll(/(?<![\w-])([\w-]+) review rounds/gi)) expect(m[1]!.toLowerCase()).toBe(words[rounds]);
       expect(text).not.toMatch(/3,000/);
       expect(text).toMatch(/\d+ kinds of (places|placements)/);
     });

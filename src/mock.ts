@@ -49,7 +49,9 @@ export function createMockServer(model: ApiModel, exchanges: Exchange[], opts: M
   }));
   candidates.sort((a, b) => b.literals - a.literals);
   const redact = opts.raw ? false : (opts.redact ?? true);
-  const trusted = new Set([...model.origins.map((o) => o.origin), ...(opts.allowOrigins ?? [])]);
+  // With --raw the recorded bodies (tokens, people's data) are served as they are: no recorded origin, which may
+  // be a third party the app called, may read them from a page. Only localhost pages can (and `allowOrigins`, set in code).
+  const trusted = new Set([...(opts.raw ? [] : model.origins.map((o) => o.origin)), ...(opts.allowOrigins ?? [])]);
   const allowed = (origin: string) => trusted.has(origin) || /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(origin);
   const scrubber = scrubberFor(model.taint);
   const clean = (v: unknown) => (redact ? scrubber.json(v) : v);
