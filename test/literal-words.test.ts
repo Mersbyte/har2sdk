@@ -28,14 +28,10 @@ const PARKER = har([
   entry({ url: `${O}/api/v1/products`, resBody: [{ sku: "A1", price: 3 }] }),
 ]);
 
-/**
- * A username the guard knows only from `from` (weak), inside the last word of a path: refused since 0.6.13.
- * (Until review 20 the segment was the bare name, `/inbox/parker`; a known name in its own segment is now a
- * path parameter (A1-02), so the refused case is a name inside a word.)
- */
+/** A username the guard knows only from `from` (weak), ending a path under another word: refused since 0.6.13. */
 const KNOWN = har([
   entry({ url: `${O}/api/v1/messages`, resBody: [{ from: "parker", unread: true }] }),
-  entry({ url: `${O}/api/v1/inbox/parker-notes`, resBody: { unread: 1 } }),
+  entry({ url: `${O}/api/v1/inbox/parker`, resBody: { unread: 1 } }),
   entry({ url: `${O}/api/v1/orders`, resBody: [{ total: 5 }] }),
 ]);
 
@@ -98,7 +94,7 @@ describe("MCP", () => {
     const an = await call("analyze_har", { har_path: path });
     expect(an.text).toContain("Path words written into client.ts");
     expect(an.text).not.toMatch(/\bparker\b/i);
-    expect(lists(an.text).single).toContainEqual(expect.stringContaining("<redacted>"));
+    expect(lists(an.text).single).toContain("<redacted>");
     const gen = await call("generate_sdk", { har_path: path, out_dir: join(tmp(), "out") });
     expect(gen.isError).toBe(true);
     expect(gen.text).not.toMatch(/\bparker\b/i);
@@ -228,7 +224,7 @@ describe("a word the guard knows never appears", () => {
     expect(() => readdirSync(out)).toThrow();
     const json = cli(["inspect", path, "--json"]).stdout;
     expect(json).not.toMatch(/parker/i);
-    expect((JSON.parse(json) as { pathWords: PathWord[] }).pathWords).toContainEqual({ word: expect.stringContaining("<redacted>"), requests: 1 });
+    expect((JSON.parse(json) as { pathWords: PathWord[] }).pathWords).toContainEqual({ word: "<redacted>", requests: 1 });
   });
 });
 

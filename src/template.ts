@@ -214,7 +214,7 @@ export function templatePaths(samples: PathSample[], opts: TemplateOptions = {})
       if (opts.taint && isTainted(opts.taint, seg) && (isIdShaped(seg) || (prevSeg && (isPlural(prevSeg) || personWord(prevSeg)) && named && !COMMON_SUBPATHS.has(lower)))) return null;
       // A value the capture uses to name a person or tenant (a login, an owner) is a member id wherever it sits,
       // not only after a plural collection word: /u/dorukbey, /in/dorukbey, /api/v1/dorukbey/feed.
-      if (prevSeg && isIdentity(opts.taint, seg) && !COMMON_SUBPATHS.has(lower) && !API_WORD.test(seg)) return null;
+      if (prevSeg && strongIdentity(opts.taint, seg) && !COMMON_SUBPATHS.has(lower) && !API_WORD.test(seg)) return null;
       // Strong tenant prefixes (/orgs/acme/repos, /t/acme-corp/projects): the
       // next segment names a tenant, unless it's a sub-collection or a keyword.
       // Weaker words (account, team, site…) need evidence: see shouldMerge.
@@ -265,7 +265,7 @@ export function templatePaths(samples: PathSample[], opts: TemplateOptions = {})
       }
       // `/@dorukbey`, `/~dorukbey`: a sigil before a person's name; the parameter keeps it.
       const sigil = !forced.has(i) && /^[@~]./.test(seg) ? seg[0]! : undefined;
-      if (sigil && isIdentity(opts.taint, seg.slice(1))) {
+      if (sigil && strongIdentity(opts.taint, seg.slice(1))) {
         tokens.push(null);
         prefixes[i] = sigil;
         hints[i] ??= "handle";
@@ -611,4 +611,9 @@ function paramNames(tokens: (string | null)[], hints: Record<number, string> = {
     names[i] = name;
   });
   return names;
+}
+
+/** An identity from strong evidence (a login, an owner, an author), not only a word under `from` / `to` / `by`. */
+function strongIdentity(taint: Taint | undefined, seg: string): boolean {
+  return isIdentity(taint, seg) && !taint!.weakIdentities.has(seg.trim().toLowerCase());
 }

@@ -20,6 +20,10 @@
  *        (`/users/dorukbey`) stayed a literal, so every such app was refused (exit 2); `username` worked.
  * A1-02: a known username after a prefix that isn't a plural word (`/u/…`, `/in/…`, `/api/v1/…/feed`) or behind a
  *        sigil (`/@dorukbey`, `/~dorukbey`) stayed a literal: refused (exit 2).
+ * A2-08: `returnTo`, `redirect_to`, `sortedBy`, `poweredBy`, `importedFrom` (and GraphQL `from` / `to` / `by`
+ *        arguments) were strong identity keys: an app word under them refused its own top-level endpoint.
+ * A2-02 (part): a mailbox's local part (`orders@shop.example`) refused `/api/v1/orders/48213`, `/api/v1beta/orders`,
+ *        `/admin/api/2024-01/orders.json`: only the last segment right after `api` or `v1` was exempt.
  */
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -686,6 +690,59 @@ describe("A1-02 a known username is a parameter after any prefix, and behind @ o
       const r = generateFromHar(capture(u, pick(rnd, SHAPES).replace("U", u)));
       expect(r.leaks, u).toEqual([]);
       for (const f of Object.values(r.files)) expect(f.toLowerCase().includes(u), u).toBe(false);
+    }
+  });
+});
+
+// ── A2-08 / A2-02 ──────────────────────────────────────────────────────────────
+
+describe("A2-08/A2-02 weak identity evidence doesn't refuse the app's own endpoints", () => {
+  const API = "https://api.shop.example";
+  const leaksOf = (entries: ReturnType<typeof entry>[]) => generateFromHar(har(entries)).leaks.length;
+
+  it("the reviewer's input: {returnTo: 'cart'} next to GET /api/v1/cart", () => {
+    for (const key of ["returnTo", "redirect_to", "sortedBy", "powered_by", "importedFrom", "navigateTo"]) {
+      expect([key, leaksOf([entry({ url: `${API}/api/v1/state`, resBody: { [key]: "cart" } }), entry({ url: `${API}/api/v1/cart`, resBody: { items: [] } })])]).toEqual([key, 0]);
+    }
+  });
+
+  /** A strong identity: never written (refused, or since A1-02 a path parameter). */
+  const strong = (key: string, w: string) => {
+    const r = generateFromHar(har([entry({ url: `${API}/api/v1/tasks`, resBody: [{ id: 1, [key]: w }] }), entry({ url: `${API}/api/v1/${w}`, resBody: { a: 1 } })]));
+    const written = r.leaks.length === 0 && Object.values(r.files).some((f) => f.includes(w));
+    return r.model.taint.identities.has(w) && !r.model.taint.weakIdentities.has(w) && !written;
+  };
+
+  it("a person's action keeps the key strong: {assignedTo: 'okilic'} names a person, never written", () => {
+    for (const key of ["assignedTo", "createdBy", "sentFrom", "reviewed_by"]) expect([key, strong(key, "okilic")]).toEqual([key, true]);
+  });
+
+  it("GraphQL from / to / by arguments are weak too", () => {
+    const gql = entry({ method: "POST", url: `${API}/graphql`, reqBody: { query: 'query Stats { stats(from: "week", to: "today", by: "channel") { n } }' }, resBody: { data: { stats: { n: 1 } } } });
+    expect(leaksOf([gql, entry({ url: `${API}/api/v1/today`, resBody: { a: 1 } })])).toBe(0);
+  });
+
+  it("a mailbox word as a collection: followed by an id, after v1beta, a dated version or with .json", () => {
+    const config = entry({ url: `${API}/api/v1/config`, resBody: { storeName: "Acme", supportEmail: "orders@acme-shop.example" } });
+    for (const path of ["/api/v1/orders/48213", "/api/v1beta/orders", "/admin/api/2024-01/orders.json", "/en-us/orders"]) {
+      expect([path, leaksOf([config, entry({ url: API + path, resBody: { id: 1 } })])]).toEqual([path, 0]);
+    }
+  });
+
+  it("but a mailbox word followed by another word is still a username: /api/v1/okilic/projects is refused", () => {
+    const config = entry({ url: `${API}/api/v1/config`, resBody: { supportEmail: "okilic@corp.example" } });
+    expect(leaksOf([config, entry({ url: `${API}/api/v1/okilic/projects`, resBody: [{ id: 1 }] })])).toBeGreaterThan(0);
+  });
+
+  it("generated: <verb>To/By/From over a random app word never refuses its top-level endpoint; a person's action does", SLOW, () => {
+    const rnd = rng(20_9);
+    for (let i = 0; i < 30; i++) {
+      const w = word(rnd, 3);
+      const nav = pick(rnd, ["returnTo", "redirectTo", "backTo", "sortedBy", "groupedBy", "poweredBy", "importedFrom", "copiedFrom"]);
+      const person = pick(rnd, ["assignedTo", "createdBy", "updatedBy", "sentFrom", "invitedBy"]);
+      const endpoint = entry({ url: `${API}/api/v1/${w}`, resBody: { a: 1 } });
+      expect([nav, w, leaksOf([entry({ url: `${API}/api/v1/state`, resBody: { [nav]: w } }), endpoint])]).toEqual([nav, w, 0]);
+      expect([person, w, strong(person, w)]).toEqual([person, w, true]);
     }
   });
 });
