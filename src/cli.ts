@@ -249,7 +249,7 @@ async function main(argv: string[]): Promise<number> {
       // The reported segments are "*" already; scrubbed like every other line, in case a literal next to one is known too.
       console.error(c.dim(`  A recorded value is a path segment. To make it a parameter, run again with:`));
       for (const p of patterns.slice(0, 5)) console.error(scrubText(`    --param "${p}"`, model.taint));
-      if (patterns.length > 5) console.error(c.dim(`    … and ${patterns.length - 5} more`));
+      if (patterns.length > 5) console.error(c.dim(`    … and more: fix these, then run again to see the rest.`));
     }
     return 2;
   }

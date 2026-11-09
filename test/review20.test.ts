@@ -50,7 +50,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Validator } from "@seriousme/openapi-schema-validator";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { assertUniqueDeclarations } from "../src/codegen.js";
-import { generateFromHar } from "../src/index.js";
+import { generateFromHar, paramPatterns } from "../src/index.js";
 import { isJsonPrefix, namedValues } from "../src/leak.js";
 import { createMcpServer } from "../src/mcp.js";
 import { listenMock } from "../src/mock.js";
@@ -1190,5 +1190,23 @@ describe("C2-10 a parameter learned on a parent path is the same parameter in it
       expect(pathsOf(r), ctx).toEqual(["/repos/{owner}/{repo}", ...children.map((c) => `/repos/{owner}/{repo}/${c}`)].sort());
       for (const v of [owner, ...names]) expect(writes(r, v), `${ctx}: ${v}`).toBe(false);
     }
+  });
+
+  it("finding the patterns costs a few scans, not one per endpoint (CI: review 17's D1 took 25.6 s on this PR's first push)", SLOW, () => {
+    // Review 17's D1 capture: 8,000 GraphQL operations, 16,000 findings, all on `/graphql`. Scanning once per
+    // operation made paramPatterns 3-4x the rest of the run. Compared with the run itself, so any machine's speed fits.
+    const entries = [];
+    for (let i = 0; i < 8000; i++) {
+      const f = `f${1000 + i}`;
+      entries.push(entry({ method: "POST", url: `${G}/graphql`, reqBody: { operationName: `Op${i}`, query: `query Op${i} { ${f} { id } }` }, resBody: { data: { [f]: { id: i } } } }));
+    }
+    const capture = har(entries);
+    let t0 = performance.now();
+    const r = generateFromHar(capture);
+    const total = performance.now() - t0;
+    expect(r.leaks.length).toBeGreaterThan(0);
+    t0 = performance.now();
+    expect(paramPatterns(r.plan)).toEqual([]);
+    expect(performance.now() - t0).toBeLessThan(total / 4);
   });
 });

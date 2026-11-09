@@ -57,8 +57,11 @@ export function generateFromModel(model: ApiModel, exchanges: Exchange[], opts: 
   return { model, plan, exchanges, files, warnings, leaks, paramPatterns: leaks.length ? paramPatterns(plan) : [] };
 }
 
+/** At most this many patterns: the CLI shows five, and each one costs a few scans. */
+const MAX_PATTERNS = 20;
+
 /**
- * For every endpoint with a literal path segment the leak guard reports, the `--param` pattern that makes that
+ * For every endpoint (up to {@link MAX_PATTERNS}) with a literal path segment the leak guard reports, the `--param` pattern that makes that
  * segment a parameter: the segment and the endpoint's parameters become "*", other literals stay, percent-encoded
  * so the pattern is safe inside double quotes in a shell. `/repos/{owner}/<recorded>/issues` gives `/repos/`, then
  * two `*` segments, then `/issues`.
@@ -66,11 +69,26 @@ export function generateFromModel(model: ApiModel, exchanges: Exchange[], opts: 
 export function paramPatterns(plan: Plan): string[] {
   const out = new Set<string>();
   const encode = (v: string) => encodeURIComponent(v).replace(/[!'()*]/g, (ch) => "%" + ch.charCodeAt(0).toString(16).toUpperCase());
-  const found = (segs: (string | null)[]) => scanText("/" + segs.map((s) => s ?? "*").join("/"), plan.model.taint, "path", boilerplate()).length;
+  const text = (segs: readonly (string | null)[]) => "/" + segs.map((s) => s ?? "*").join("/");
+  // One scan reads every recorded value, so scans are counted, not paths: each distinct path once (8,000
+  // GraphQL operations share `/graphql`), whole groups at a time, halving only a group that reports something.
+  const scan = (t: string) => scanText(t, plan.model.taint, "path", boilerplate()).length;
+  const found = (segs: (string | null)[]) => scan(text(segs));
+  const paths = new Map<string, (string | null)[]>();
   for (const op of plan.ops) {
+    const segs = op.ep.tokens.map((t) => (t.kind === "param" ? null : t.value));
+    paths.set(text(segs), segs);
+  }
+  const reported: (string | null)[][] = [];
+  const narrow = (group: string[]): void => {
+    if (reported.length >= MAX_PATTERNS || !scan(group.join("\n"))) return;
+    if (group.length === 1) reported.push(paths.get(group[0]!)!);
+    else for (const half of [group.slice(0, group.length >> 1), group.slice(group.length >> 1)]) narrow(half);
+  };
+  narrow([...paths.keys()]);
+  for (const segs of reported) {
     // null = "*". A value can span segments ("owner/name" recorded, `/repos/owner/name` requested): from the
     // last segment back, star every literal whose removal reports less, until nothing is reported.
-    const segs = op.ep.tokens.map((t) => (t.kind === "param" ? null : t.value));
     let left = found(segs);
     if (!left) continue;
     for (let i = segs.length - 1; i >= 0 && left; i--) {
