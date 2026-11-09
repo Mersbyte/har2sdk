@@ -244,6 +244,13 @@ async function main(argv: string[]): Promise<number> {
       c.red(`\n✗ The leak guard found ${result.leaks.length} recorded value${result.leaks.length === 1 ? "" : "s"} in the output; nothing was written.`) +
         c.dim(`\n  Fix it with --param / --exclude-path / annotations, or pass --allow-leaks if you're sure (and please report a false positive).`),
     );
+    const patterns = result.paramPatterns;
+    if (patterns.length) {
+      // The reported segments are "*" already; scrubbed like every other line, in case a literal next to one is known too.
+      console.error(c.dim(`  A recorded value is a path segment. To make it a parameter, run again with:`));
+      for (const p of patterns.slice(0, 5)) console.error(scrubText(`    --param "${p}"`, model.taint));
+      if (patterns.length > 5) console.error(c.dim(`    … and ${patterns.length - 5} more`));
+    }
     return 2;
   }
   // Never overwrite a client.ts / openapi.json that har2sdk didn't write (the MCP server checks the same).

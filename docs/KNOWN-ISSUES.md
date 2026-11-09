@@ -8,7 +8,7 @@ Fixed findings are in the 0.6.16 entry of CHANGELOG.md. These are open:
 
 - **Privacy: carriers the guard doesn't read.** A value whose only evidence is in a YAML body, a form-encoded *response*, a `Content-Disposition` file name, URL userinfo (`https://user@host`) or an `@mention` inside text isn't collected, so the same value used elsewhere can stay a path literal (A1-05). A person's own subdomain (`zkaya.app.example`) is open too (A1-03). A2-03 (the guard reporting a host name) is left as it is on purpose: not reporting host names would also stop reporting such a subdomain.
 - **False refusals.** A mailbox's local part (`cart@shop.example`) followed by another word in a path (`/api/v1/cart/items`) is still taken as a possible username, the same shape as `/api/v1/okilic/projects`, so such an app can be refused (A2-02, in part; 36 of 320 generated mailbox shapes). Other refusal cases from the audit: A2-01, A2-04 to A2-07. A refusal never writes the value; `--param` or annotations get past it.
-- **Correctness for less common API styles:** GraphQL served under a templated path (C2-02); query parameters dropped on RPC calls (C2-04); Google-style custom methods such as `/v1/operations/{id}:cancel` (C2-05); OData (C2-06); sibling parameters (C2-10). Also DJ-03, E-01, E-09 and H-01, and the audit's Low findings.
+- **Correctness for less common API styles:** GraphQL served under a templated path (C2-02); query parameters dropped on RPC calls (C2-04); Google-style custom methods such as `/v1/operations/{id}:cancel` (C2-05); OData (C2-06). (Sibling parameters, C2-10, are fixed in 0.6.18: see CHANGELOG.md.) Also DJ-03, E-01, E-09 and H-01, and the audit's Low findings.
 
 ## From the 0.6.0 work
 
@@ -17,10 +17,6 @@ Fixed findings are in the 0.6.16 entry of CHANGELOG.md. These are open:
 - **Values with no evidence.** A plain word used once as a path segment, never echoed, never listed and never stored under a personal or identity key (for example `/api/whoami` returning the text `mdemir` and nothing else naming it) can't be recognised. This is the documented limit of the guard (SECURITY.md, *Limits*).
 - **Short or lower-case random tokens.** Letter-only tokens are judged by rare letter pairs and case flips (0.6.1, A4). Long mixed-case tokens are recognised; a 12-letter lower-case one about half the time (`xkqbvtrmplsa` yes, a pronounceable `kobulimaterasu` no). The other direction: a camel-case name made mostly of acronyms (`ListAWSIAMRolesForEC`) and some surnames (`kowalczyk`) count as random, so such a path segment becomes a parameter.
 - **GraphQL variable defaults.** Since 0.6.10 string, number, list and input-object defaults move into the variables and leave the document; boolean, null and enum defaults stay. A recorded value in a `#` comment of a document stays in `client.ts` (the prompt and MCP show documents without comments); the guard recognises it and refuses to write the client.
-
-## Correctness
-
-- **Word-with-digits repository names at a learned position.** `/repos/{owner}/widget9/issues` stays literal when `widget9` is only echoed by `/repos/{owner}/widget9` and not listed by a `…/repos` response: words with one or two digits (`oauth2`, `ipv4`) are kept literal on purpose (review 4, R2). The guard then refuses only if `widget9` was recorded as personal data.
 
 ## Testing
 

@@ -29,6 +29,11 @@ export interface GenerateResult {
   warnings: string[];
   /** Recorded values the leak guard found in the generated files (masked previews only). */
   leaks: LeakFinding[];
+  /**
+   * When there are leaks: `--param` patterns that make each path segment the guard reports a parameter
+   * (see {@link paramPatterns}). The reported segments are "*", so a pattern never contains the value.
+   */
+  paramPatterns: string[];
 }
 
 export function generateFromHar(harText: string, opts: GenerateOptions = {}): GenerateResult {
@@ -49,7 +54,38 @@ export function generateFromModel(model: ApiModel, exchanges: Exchange[], opts: 
   const leaks = Object.entries(files).flatMap(([name, text]) => scanText(text, model.taint, name, ignore(name)));
   const warnings = [...plan.warnings];
   if (leaks.length) warnings.push(leakWarning(leaks));
-  return { model, plan, exchanges, files, warnings, leaks };
+  return { model, plan, exchanges, files, warnings, leaks, paramPatterns: leaks.length ? paramPatterns(plan) : [] };
+}
+
+/**
+ * For every endpoint with a literal path segment the leak guard reports, the `--param` pattern that makes that
+ * segment a parameter: the segment and the endpoint's parameters become "*", other literals stay, percent-encoded
+ * so the pattern is safe inside double quotes in a shell. `/repos/{owner}/<recorded>/issues` gives `/repos/`, then
+ * two `*` segments, then `/issues`.
+ */
+export function paramPatterns(plan: Plan): string[] {
+  const out = new Set<string>();
+  const encode = (v: string) => encodeURIComponent(v).replace(/[!'()*]/g, (ch) => "%" + ch.charCodeAt(0).toString(16).toUpperCase());
+  const found = (segs: (string | null)[]) => scanText("/" + segs.map((s) => s ?? "*").join("/"), plan.model.taint, "path", boilerplate()).length;
+  for (const op of plan.ops) {
+    // null = "*". A value can span segments ("owner/name" recorded, `/repos/owner/name` requested): from the
+    // last segment back, star every literal whose removal reports less, until nothing is reported.
+    const segs = op.ep.tokens.map((t) => (t.kind === "param" ? null : t.value));
+    let left = found(segs);
+    if (!left) continue;
+    for (let i = segs.length - 1; i >= 0 && left; i--) {
+      if (segs[i] === null) continue;
+      const trial = segs.map((s, j) => (j === i ? null : s));
+      const n = found(trial);
+      if (n < left) {
+        segs.splice(0, segs.length, ...trial);
+        left = n;
+      }
+    }
+    // Something the guard reports that no single segment explains (the endpoint's method name): no pattern.
+    if (!left) out.add("/" + segs.map((s) => (s === null ? "*" : encode(s))).join("/"));
+  }
+  return [...out];
 }
 
 /** The boilerplate words plus the recorded values that are dates or timestamps. */

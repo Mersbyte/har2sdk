@@ -1010,3 +1010,185 @@ describe("I-01 the README's MCP setup pins the released version", () => {
     for (const spec of [...shell, ...json]) expect(spec).toBe(`har2sdk@${version}`);
   });
 });
+
+// ── C2-10 ──────────────────────────────────────────────────────────────────────
+
+describe("C2-10 a parameter learned on a parent path is the same parameter in its child paths", () => {
+  const G = "https://api.gitlike.test";
+  const pathsOf = (r: ReturnType<typeof generateFromHar>) => r.model.endpoints.map((e) => e.path).sort();
+  const writes = (r: ReturnType<typeof generateFromHar>, v: string) => Object.values(r.files).some((f) => f.toLowerCase().includes(v.toLowerCase()));
+  const repo = (owner: string, name: string) => entry({ url: `${G}/repos/${owner}/${name}`, resBody: { id: 1, name, owner: { login: owner } } });
+  const issues = (owner: string, name: string, body: unknown = [{ number: 1, title: "bug" }]) => entry({ url: `${G}/repos/${owner}/${name}/issues`, resBody: body });
+
+  it("the reported capture: /repos/zkaya/dotfiles and /repos/zkaya/dotfiles/issues", () => {
+    const r = generateFromHar(har([repo("zkaya", "dotfiles"), issues("zkaya", "dotfiles")]));
+    expect(r.leaks).toEqual([]);
+    expect(pathsOf(r)).toEqual(["/repos/{owner}/{repo}", "/repos/{owner}/{repo}/issues"]);
+    for (const v of ["zkaya", "dotfiles"]) expect(writes(r, v), v).toBe(false);
+  });
+
+  it("the reported capture with three repos answering only full_name: one parent and one issues endpoint", () => {
+    const repos = ["dotfiles", "blog", "website"];
+    const r = generateFromHar(
+      har(repos.flatMap((n) => [entry({ url: `${G}/repos/zkaya/${n}`, resBody: { full_name: `zkaya/${n}` } }), issues("zkaya", n)])),
+    );
+    expect(r.leaks).toEqual([]);
+    expect(r.model.endpoints).toHaveLength(2);
+    const [parent, child] = [...r.model.endpoints].sort((a, b) => a.path.length - b.path.length);
+    // The same parameter, at the same position, in both.
+    expect(parent!.tokens[2]).toMatchObject({ kind: "param" });
+    expect(child!.tokens[2]).toEqual(parent!.tokens[2]);
+    expect(child!.tokens[3]).toEqual({ kind: "literal", value: "issues" });
+    for (const v of repos) expect(writes(r, v), v).toBe(false);
+  });
+
+  it("deeper children follow: issues/{n}/comments and pulls", () => {
+    const r = generateFromHar(
+      har([
+        repo("zkaya", "dotfiles"),
+        entry({ url: `${G}/repos/zkaya/dotfiles/issues/12/comments`, resBody: [{ id: 5, body: "x" }] }),
+        entry({ url: `${G}/repos/zkaya/dotfiles/pulls`, resBody: [{ number: 3 }] }),
+      ]),
+    );
+    expect(r.leaks).toEqual([]);
+    expect(pathsOf(r)).toEqual(["/repos/{owner}/{repo}", "/repos/{owner}/{repo}/issues/{issueId}/comments", "/repos/{owner}/{repo}/pulls"]);
+  });
+
+  it("a word with digits follows too when that very value was templated (was a known issue: widget9)", () => {
+    const r = generateFromHar(har([repo("zkaya", "widget9"), issues("zkaya", "widget9")]));
+    expect(pathsOf(r)).toEqual(["/repos/{owner}/{repo}", "/repos/{owner}/{repo}/issues"]);
+    // Words with digits that no parent templated stay literal (review 4, R2).
+    const vocab = generateFromHar(har([repo("zkaya", "widget9"), entry({ url: `${G}/repos/zkaya/oauth2/token`, resBody: { ok: true } })]));
+    expect(pathsOf(vocab)).toContain("/repos/{owner}/oauth2/token");
+  });
+
+  it("siblings under one prefix that differ only in that segment merge, also one with no parent of its own", () => {
+    const two = generateFromHar(har([repo("zkaya", "dotfiles"), repo("zkaya", "blog"), issues("zkaya", "dotfiles"), issues("zkaya", "blog", [{ number: 4, title: "typo" }])]));
+    expect(pathsOf(two)).toEqual(["/repos/{owner}/{repo}", "/repos/{owner}/{repo}/issues"]);
+    expect(two.model.endpoints.find((e) => e.path.endsWith("/issues"))!.count).toBe(2);
+    const orphan = generateFromHar(har([repo("zkaya", "dotfiles"), issues("zkaya", "dotfiles"), issues("zkaya", "blog", [{ number: 4, title: "typo" }])]));
+    expect(orphan.leaks).toEqual([]);
+    expect(pathsOf(orphan)).toEqual(["/repos/{owner}/{repo}", "/repos/{owner}/{repo}/issues"]);
+  });
+
+  it("a sibling whose response has another shape stays a literal", () => {
+    const r = generateFromHar(har([repo("zkaya", "dotfiles"), issues("zkaya", "dotfiles"), issues("zkaya", "trending", { total: 3, updatedAt: "2026-01-01" })]));
+    expect(pathsOf(r)).toEqual(["/repos/{owner}/trending/issues", "/repos/{owner}/{repo}", "/repos/{owner}/{repo}/issues"]);
+  });
+
+  it("/users/me and /users/{id} stay apart, also in their child paths", () => {
+    const r = generateFromHar(
+      har([
+        entry({ url: `${G}/users/123`, resBody: { id: 123, bio: "a" } }),
+        entry({ url: `${G}/users/456`, resBody: { id: 456, bio: "b" } }),
+        entry({ url: `${G}/users/me`, resBody: { id: 123, bio: "a" } }),
+        entry({ url: `${G}/users/123/orders`, resBody: [{ id: 1 }] }),
+        entry({ url: `${G}/users/me/orders`, resBody: [{ id: 1 }] }),
+      ]),
+    );
+    expect(pathsOf(r)).toEqual(["/users/me", "/users/me/orders", "/users/{userId}", "/users/{userId}/orders"]);
+    // Also when the users are named by login (a position that holds names, not ids).
+    const named = generateFromHar(
+      har([
+        entry({ url: `${G}/users/alice`, resBody: { login: "alice", bio: "a" } }),
+        entry({ url: `${G}/users/bob`, resBody: { login: "bob", bio: "b" } }),
+        entry({ url: `${G}/users/alice/repos`, resBody: [{ id: 1, name: "x" }] }),
+        entry({ url: `${G}/users/me/repos`, resBody: [{ id: 1, name: "x" }] }),
+      ]),
+    );
+    expect(pathsOf(named)).toContain("/users/me/repos");
+    expect(pathsOf(named)).toContain("/users/{userId}/repos");
+  });
+
+  it("/api/v1 and /api/v2 stay apart, with a parameter learned under each", () => {
+    const r = generateFromHar(
+      har([
+        entry({ url: `${G}/api/v1/users/1`, resBody: { id: 1 } }),
+        entry({ url: `${G}/api/v2/users/2`, resBody: { id: 2 } }),
+        entry({ url: `${G}/api/v1/users/1/orders`, resBody: [{ id: 1 }] }),
+        entry({ url: `${G}/api/v2/users/2/orders`, resBody: [{ id: 1 }] }),
+      ]),
+    );
+    expect(pathsOf(r)).toEqual(["/api/v1/users/{userId}", "/api/v1/users/{userId}/orders", "/api/v2/users/{userId}", "/api/v2/users/{userId}/orders"]);
+  });
+
+  it("a word next to ids stays a literal: /products/featured/reviews next to /products/{productId}/reviews", () => {
+    const r = generateFromHar(
+      har([
+        entry({ url: `${G}/products/101`, resBody: { id: 101, title: "a" } }),
+        entry({ url: `${G}/products/102`, resBody: { id: 102, title: "b" } }),
+        entry({ url: `${G}/products/101/reviews`, resBody: [{ id: 1, stars: 5 }] }),
+        entry({ url: `${G}/products/featured/reviews`, resBody: [{ id: 1, stars: 5 }] }),
+      ]),
+    );
+    expect(pathsOf(r)).toEqual(["/products/featured/reviews", "/products/{productId}", "/products/{productId}/reviews"]);
+  });
+
+  it("the client compiles and requests each repo's own URL", async () => {
+    const r = generate(har([repo("zkaya", "dotfiles"), repo("zkaya", "blog"), issues("zkaya", "dotfiles"), issues("zkaya", "blog")]));
+    const code = r.files["client.ts"]!;
+    expect(compile(code)).toBe("");
+    const mod = await load(code);
+    const urls: string[] = [];
+    const fetch = async (url: URL) => {
+      urls.push(String(url));
+      return new Response("[]", { headers: { "content-type": "application/json" } });
+    };
+    const client = new mod[r.plan.clientName]({ fetch });
+    const op = r.plan.ops.find((o) => o.ep.path === "/repos/{owner}/{repo}/issues")!;
+    await client[op.ep.name]({ owner: "x", repo: "a b" });
+    expect(urls).toEqual([`${G}/repos/x/a%20b/issues`]);
+  }, SLOW.timeout);
+
+  it("refused: the CLI names the --param patterns, without the value, and they fix it", () => {
+    // One repo answering only full_name: no second repo to learn from, and "owner/name" is in the path.
+    const capture = har([entry({ url: `${G}/repos/zkaya/dotfiles`, resBody: { full_name: "zkaya/dotfiles" } }), issues("zkaya", "dotfiles")]);
+    const r = generateFromHar(capture);
+    expect(r.leaks.length).toBeGreaterThan(0);
+    expect(r.paramPatterns).toEqual(["/repos/zkaya/*", "/repos/zkaya/*/issues"]);
+    expect(generateFromHar(capture, { params: r.paramPatterns }).leaks).toEqual([]);
+
+    const dir = tmp();
+    writeFileSync(join(dir, "c.har"), capture);
+    const refused = spawnSync(process.execPath, [CLI, join(dir, "c.har"), "-o", join(dir, "out")], { encoding: "utf8", env: { ...process.env, NO_COLOR: "1" } });
+    expect(refused.status).toBe(2);
+    expect(refused.stderr).toContain(`--param "/repos/zkaya/*/issues"`);
+    expect(refused.stdout + refused.stderr).not.toContain("dotfiles");
+    const fixed = spawnSync(process.execPath, [CLI, join(dir, "c.har"), "-o", join(dir, "out"), "--param", "/repos/zkaya/*", "--param", "/repos/zkaya/*/issues"], {
+      encoding: "utf8",
+    });
+    expect(fixed.status).toBe(0);
+  }, SLOW.timeout);
+
+  it("no pattern when nothing is refused, and patterns keep other literals encoded for a shell", () => {
+    expect(generateFromHar(har([repo("zkaya", "dotfiles"), issues("zkaya", "dotfiles")])).paramPatterns).toEqual([]);
+    const capture = har([
+      entry({ url: `${G}/a!b/repos/zkaya/dotfiles`, resBody: { full_name: "zkaya/dotfiles" } }),
+      entry({ url: `${G}/a!b/repos/zkaya/dotfiles/x$(id)`, resBody: { ok: true } }),
+    ]);
+    const r = generateFromHar(capture);
+    for (const p of r.paramPatterns) expect(p).not.toMatch(/[!$()"'`\\]/);
+    expect(r.paramPatterns).toContain("/a%21b/repos/zkaya/*/x%24%28id%29");
+    expect(generateFromHar(capture, { params: r.paramPatterns }).leaks).toEqual([]);
+  });
+
+  it("generated: random owners, repo names and child paths become one template per child, never refused or written", SLOW, () => {
+    const rnd = rng(20_10);
+    const CHILDREN = ["issues", "pulls", "commits", "branches", "releases", "labels"];
+    for (let i = 0; i < 40; i++) {
+      const owner = word(rnd, 3) + pick(rnd, ["", "x", "42"]);
+      const names = [...new Set(Array.from({ length: 1 + Math.floor(rnd() * 3) }, () => word(rnd, 3)))];
+      const children = [...new Set(Array.from({ length: 1 + Math.floor(rnd() * 3) }, () => pick(rnd, CHILDREN)))];
+      const entries = names.flatMap((n) => [
+        // Some repos answer with name and owner, some with full_name only; a repo may have no parent recorded.
+        ...(rnd() < 0.85 || n === names[0] ? [entry({ url: `${G}/repos/${owner}/${n}`, resBody: rnd() < 0.5 ? { id: 1, name: n, owner: { login: owner } } : { id: 1, name: n, full_name: `${owner}/${n}`, owner: { login: owner } } })] : []),
+        ...children.map((c) => entry({ url: `${G}/repos/${owner}/${n}/${c}`, resBody: [{ number: Math.floor(rnd() * 900) + 1, title: "t" }] })),
+      ]);
+      const r = generateFromHar(har(entries));
+      const ctx = `${owner} ${names.join(",")} ${children.join(",")}`;
+      expect(r.leaks, ctx).toEqual([]);
+      expect(pathsOf(r), ctx).toEqual(["/repos/{owner}/{repo}", ...children.map((c) => `/repos/{owner}/{repo}/${c}`)].sort());
+      for (const v of [owner, ...names]) expect(writes(r, v), `${ctx}: ${v}`).toBe(false);
+    }
+  });
+});
