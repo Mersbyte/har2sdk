@@ -135,7 +135,7 @@ The engine is deterministic; naming is where a language model helps. What a mode
 **MCP server** (Claude Code, Claude Desktop, Cursor, any MCP client):
 
 ```bash
-claude mcp add har2sdk -- npx -y har2sdk@0.6.19 mcp
+claude mcp add har2sdk -- npx -y har2sdk@0.6.20 mcp
 ```
 
 The version is pinned on purpose: an MCP server started with `npx` runs again every time your editor starts, and an unpinned one would download and run whatever release is newest then, without a review step. Change the version when you choose to update.
@@ -145,12 +145,12 @@ The version is pinned on purpose: an MCP server started with `npx` runs again ev
 ```json
 {
   "mcpServers": {
-    "har2sdk": { "command": "npx", "args": ["-y", "har2sdk@0.6.19", "mcp"] }
+    "har2sdk": { "command": "npx", "args": ["-y", "har2sdk@0.6.20", "mcp"] }
   }
 }
 ```
 
-On Windows, if the server doesn't start, use `"command": "cmd", "args": ["/c", "npx", "-y", "har2sdk@0.6.19", "mcp"]`.
+On Windows, if the server doesn't start, use `"command": "cmd", "args": ["/c", "npx", "-y", "har2sdk@0.6.20", "mcp"]`.
 </details>
 
 Then ask: *"Turn ~/Downloads/capture.har into an SDK with great names."* Claude calls `analyze_har`, `inspect_endpoint` and `generate_sdk`. The server writes to `har2sdk-out` next to the HAR file; `out_dir` must stay inside the HAR's folder, the server's working directory (not `/` or your home folder) or the temp directory. It never writes through a symbolic link (a linked `har2sdk-out` or `har2sdk.annotations.json` is an error).

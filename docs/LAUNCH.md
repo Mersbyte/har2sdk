@@ -1,6 +1,6 @@
-# Launch kit — har2sdk 0.6.19
+# Launch kit — har2sdk 0.6.20
 
-Drafts for announcing 0.6.19. Every claim below is in the README; nothing here goes further. Post only after the repository is public and `npm publish` has run (the badge, `npx har2sdk` and the README images depend on both).
+Drafts for announcing 0.6.20. Every claim below is in the README; nothing here goes further. Post only after the repository is public and `npm publish` has run (the badge, `npx har2sdk` and the README images depend on both).
 
 Links used below:
 - Repo: https://github.com/Mersbyte/har2sdk

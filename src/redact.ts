@@ -482,8 +482,10 @@ export class Scrubber {
     // Keep the first digit non-zero so the fake has the recorded magnitude.
     let fi = fakeDigits(int);
     if (int.length > 1 && fi[0] === "0") fi = String((Number(int[0]) % 9) + 1) + fi.slice(1);
-    const out = Number(frac ? `${fi}.${fakeDigits(frac)}` : fi);
-    return Number.isFinite(out) ? out * Math.sign(value) : value;
+    let out = Number(frac ? `${fi}.${fakeDigits(frac)}` : fi);
+    // A decimal put together from two fakes can still be another recorded number: draw its fraction again.
+    for (let k = 1; frac && this.known(String(out)) && k < 32; k++) out = Number(`${fi}.${fakeDigits(frac + "x" + k).slice(0, frac.length)}`);
+    return Number.isFinite(out) && !this.known(String(out)) ? out * Math.sign(value) : 0;
   }
 
   /** @param inRecord the value is a field of a person's record (an object with contact fields). */
@@ -700,8 +702,10 @@ export class Scrubber {
         .join("");
     // Drew the recorded value itself: draw again from the same stream. Never derive the
     // fake from the recorded value (reversing it kept it readable and broke its shape).
+    // Nor another recorded value: a short fake (`482` for `105`) can land on a different recorded id by chance,
+    // and the leak guard would then report it (and the mock would serve a real value as a fake).
     let body = draw();
-    for (let tries = 0; body === rest && tries < 8; tries++) body = draw();
+    for (let tries = 0; (body === rest || this.known(prefix + body)) && tries < 32; tries++) body = draw();
     // Still the recorded value (only separators, or a very unlucky run): bump the first digit or letter.
     // This bump is still derived from the recorded value, but it only runs after 9 draws in a row
     // all returned it, which is next to impossible for any value with a digit or letter in it.
