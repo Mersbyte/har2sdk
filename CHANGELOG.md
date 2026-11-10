@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.20
+
+**Mock and `--examples`**
+- A fake could land on another recorded value: a three-digit id faked as a different recorded id (`105` → `482` when `482` was also a product id), or a decimal made of two fakes equal to another recorded number. The leak guard then reported the `--examples` spec, and the mock served a real value as a fake. Since fakes are drawn anew on each run, this failed at random (once on CI for the Chromium recording). A fake is now drawn again until it is neither the value itself nor any recorded value. Tests in `test/review24.test.ts` (block "#4 (CI)": 300 recorded three-digit ids, 15 runs); they fail on 0.6.19.
+
 ## 0.6.19
 
 Fixes from a twenty-fourth review: an independent pre-launch audit by another AI model of 0.6.17, each finding reproduced on 0.6.18 with the reviewer's input before it was fixed. Tests are in `test/review24.test.ts` (one block per finding, with a generated variant for the origin choice). `test/fixtures/demo-snapshot.json` is unchanged. One test of review 23 changed on purpose: it expected an empty object `{}` to merge with a named type that has required fields, which is the unsound case this review found (#7).

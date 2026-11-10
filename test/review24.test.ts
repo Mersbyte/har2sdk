@@ -157,6 +157,35 @@ describe("#4 the mock fakes ids, amounts and long numbers, consistently", () => 
   });
 });
 
+describe("#4 (CI) a fake number never lands on another recorded value", () => {
+  // CI on main failed once: the demo's 3-digit product id was faked as another recorded product id, and the
+  // leak guard reported the --examples spec. With 300 of the 900 three-digit ids recorded, an unchecked fake
+  // lands on a recorded one about a third of the time.
+  const many = har([
+    entry({ url: `${API}/v1/products`, reqHeaders: BEARER, resBody: Array.from({ length: 300 }, (_, i) => ({ id: 100 + i * 3, price: 10 + (i % 7) + 0.25 * (i % 4) })) }),
+    ...[100, 103, 106, 109].map((id) => entry({ url: `${API}/v1/products/${id}`, reqHeaders: BEARER, resBody: { id, price: 12.5 } })),
+  ]);
+
+  it("--examples is never refused, over many runs (each run draws new fakes)", () => {
+    for (let i = 0; i < 15; i++) expect(generateFromHar(many, { examples: true }).leaks, `run ${i}`).toEqual([]);
+  });
+
+  it("the mock never serves a recorded id as a fake", async () => {
+    const r = generateFromHar(many);
+    const recorded = new Set(Array.from({ length: 300 }, (_, i) => 100 + i * 3));
+    const server = await listenMock(r.model, r.exchanges, { port: 0 });
+    try {
+      const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      const list = (await (await fetch(`${base}/v1/products`)).json()) as { id: number }[];
+      expect(list.length).toBeGreaterThan(0);
+      for (const p of list) expect(recorded.has(p.id), String(p.id)).toBe(false);
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
+  });
+});
+
 describe("#5 a recorded id behind a short prefix becomes a parameter", () => {
   for (const seg of ["u48213", "user48213", "user-48213"]) {
     it(`/v1/feeds/${seg} with "id": 48213 recorded`, () => {
