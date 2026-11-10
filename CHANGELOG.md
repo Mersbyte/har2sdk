@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.18
+
+Fixes the review-20 finding C2-10 (sibling parameters), reported again by a test of 0.6.17. Tests are in `test/review20.test.ts` (block C2-10, with a generated variant); they fail on 0.6.17 except the three that check paths stay apart (and the timing test, which is about the new code). `test/fixtures/demo-snapshot.json` is unchanged.
+
+**Correctness**
+- A parameter learned on a parent path wasn't applied to its child paths. `/repos/zkaya/dotfiles` echoing `{ "name": "dotfiles", "owner": { "login": "zkaya" } }` gave `/repos/{owner}/{repo}`, but `/repos/zkaya/dotfiles/issues` stayed `/repos/{owner}/dotfiles/issues`; with three repos, each repo's `/issues` was its own method, and when the name was recorded as data the run was refused (exit 2). A literal that is one of the very values a position was templated from, under the same prefix, is now that parameter in every longer path (`/repos/{owner}/{repo}/issues`, `…/issues/{issueId}/comments`), and siblings that differ only there merge. A sibling with no parent of its own (`/repos/zkaya/blog/issues`) joins when that position holds names (not ids) and its response has the same shape. This also fixes the known issue of word-with-digits names at a learned position (`/repos/{owner}/widget9/issues`). Versions (`/api/v1` vs `/api/v2`), API words and "current one" words (`/users/me`, `settings`…) never join, and a word next to ids (`/products/featured/reviews` next to `/products/{productId}/reviews`) stays a literal.
+- A response naming the path's last two segments (`{ "full_name": "zkaya/dotfiles" }` for `/repos/zkaya/dotfiles`, GitHub's and GitLab's owner/name) now counts as echoing the last one, so three such repos become `/repos/zkaya/{…}` instead of three literal endpoints that the guard refused.
+
+**CLI**
+- When the leak guard refuses because a recorded value is a path segment, the CLI now prints the `--param` patterns that make it a parameter (`--param "/repos/zkaya/*/issues"`): the reported segments (found from the last segment back, so a value spanning two segments such as `owner/name` is covered) and the endpoint's parameters are `*`, other literals stay, percent-encoded so the pattern is safe in double quotes. The guard reports nothing in a pattern it prints, and the line is scrubbed like the others. The library returns them as `paramPatterns` (at most 20; the CLI shows five). Finding them costs a few scans of the capture's values, not one per endpoint. The leak guard itself is unchanged.
+
 ## 0.6.17
 
 Fixes from a twenty-first review (a security pass by another AI assistant against the published 0.6.16), a twenty-second (the MCP server as a model drives it) and a twenty-third (an independent test conversation's list of fourteen items). Eight security findings and the twenty-third review's items are fixed, each reproduced with the reviewer's input before it was fixed. Tests are in `test/review21.test.ts`, `test/review22.test.ts` and `test/review23.test.ts`, with generated variants. `test/fixtures/demo-snapshot.json` is unchanged.

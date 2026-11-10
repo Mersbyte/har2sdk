@@ -191,8 +191,8 @@ export function analyzeExchanges(all: Exchange[], opts: AnalyzeOptions = {}): Ap
     if (ex.responseBody?.kind === "json" && ex.status < 400) {
       s.hasJson = true;
       collectKeyPaths(ex.responseBody.value, s.keyPaths, "", 0);
-      const segs = new Set(splitPath(ex.pathname).map((x) => x.toLowerCase()));
-      collectEchoes(ex.responseBody.value, segs, s.echoed!, s.echoFields!);
+      const ordered = splitPath(ex.pathname).map((x) => x.toLowerCase());
+      collectEchoes(ex.responseBody.value, new Set(ordered), s.echoed!, s.echoFields!, 0, "", ordered.length >= 2 ? ordered.slice(-2).join("/") : undefined);
       collectMembers(ex.pathname, ex.responseBody.value, members);
     }
   }
@@ -1134,20 +1134,23 @@ const ID_FIELD = /^(id|uuid|slug|login|username|user_?name|handle|screen_?name|n
  * /users/alice) — not values somewhere in a list (`state: "active"` items
  * under /projects/active) — plus the id fields of an owner-like object
  * (`{ owner: { login: "alice" } }` for /repos/alice/x), recorded as "owner.login".
+ * A value naming the path's last two segments (`{"full_name": "alice/x"}` for
+ * /repos/alice/x, GitHub's and GitLab's owner/name) echoes the last one.
  */
-function collectEchoes(value: unknown, segs: Set<string>, out: Set<string>, fields: Map<string, string>, depth = 0, prefix = ""): void {
+function collectEchoes(value: unknown, segs: Set<string>, out: Set<string>, fields: Map<string, string>, depth = 0, prefix = "", tail?: string): void {
   if (!isObject(value) || depth > 1) return;
   for (const [k, v] of Object.entries(value)) {
     if (typeof v === "string" && ID_FIELD.test(k)) {
-      const s = v.toLowerCase();
-      if (segs.has(s)) {
+      const lower = v.toLowerCase();
+      const s = segs.has(lower) ? lower : tail !== undefined && lower === tail ? tail.slice(tail.lastIndexOf("/") + 1) : undefined;
+      if (s !== undefined) {
         out.add(s);
         if (!fields.has(s) || !prefix) fields.set(s, prefix + k);
       }
     } else if (depth === 0 && isObject(v) && /^(data|result|user|item|profile|record)$/i.test(k)) {
-      collectEchoes(v, segs, out, fields, depth + 1, prefix);
+      collectEchoes(v, segs, out, fields, depth + 1, prefix, tail);
     } else if (depth === 0 && isObject(v) && isIdentityKey(k)) {
-      collectEchoes(v, segs, out, fields, depth + 1, k + ".");
+      collectEchoes(v, segs, out, fields, depth + 1, k + ".", tail);
     }
   }
 }

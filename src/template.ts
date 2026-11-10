@@ -389,8 +389,10 @@ function valueShape(v: string): string {
 /**
  * Apply learned parameters to longer paths: once `/api/orders/{orderId}` is
  * known, `/api/orders/ord-77314/refund` also has an order id at that position —
- * if the literal has the same shape as the recorded ids (digits included), or
- * was itself recorded as data.
+ * if the literal has the same shape as the recorded ids (digits included), was
+ * itself recorded as data, or is one of the very values that position was
+ * templated from (`/repos/{owner}/{repo}` from `/repos/zkaya/dotfiles` makes
+ * `/repos/zkaya/dotfiles/issues` `/repos/{owner}/{repo}/issues`).
  */
 function applyLearnedParams(input: Entry[], taint: Taint | undefined, members?: Map<string, Set<string>>): Entry[] {
   let list = input;
@@ -398,15 +400,22 @@ function applyLearnedParams(input: Entry[], taint: Taint | undefined, members?: 
     let changed = false;
     // Index: (origin, position, prefix) → entries with a parameter at that position.
     const prefixKey = (e: Entry, i: number) => e.origin + "\u0000" + i + "\u0000" + e.tokens.slice(0, i).map((_, j) => tk(e, j)).join("/");
+    // Index: the whole template with position i left open → entries with a parameter there (siblings).
+    const siblingKey = (e: Entry, i: number) => e.origin + "\u0000" + e.tokens.length + "\u0000" + i + "\u0000" + e.tokens.map((_, j) => (j === i ? "*" : tk(e, j))).join("/");
     const byPrefix = new Map<string, Entry[]>();
+    const bySibling = new Map<string, Entry[]>();
     const summaries = new Map<string, Summary>();
+    const learned = new Map<string, Set<string>>();
+    const add = (index: Map<string, Entry[]>, k: string, f: Entry) => {
+      const arr = index.get(k);
+      if (arr) arr.push(f);
+      else index.set(k, [f]);
+    };
     for (const f of list) {
       f.tokens.forEach((t, i) => {
         if (t !== null) return;
-        const k = prefixKey(f, i);
-        const arr = byPrefix.get(k);
-        if (arr) arr.push(f);
-        else byPrefix.set(k, [f]);
+        add(byPrefix, prefixKey(f, i), f);
+        add(bySibling, siblingKey(f, i), f);
       });
     }
     for (const e of list) {
@@ -417,15 +426,31 @@ function applyLearnedParams(input: Entry[], taint: Taint | undefined, members?: 
         const knowns = byPrefix.get(pk);
         const known = knowns?.[0];
         if (!known) continue;
-        if (VERSION.test(lit) || WORD_DIGITS.test(lit)) continue;
+        // Never a version (/api/v1 vs /api/v2), an API word or a "current one" word (/users/me): none of the
+        // rules below takes one (none is id-shaped, a member or a sibling), and the two new ones mustn't either.
+        if (VERSION.test(lit) || API_WORD.test(lit) || COMMON_SUBPATHS.has(lit.toLowerCase())) continue;
+        let values = learned.get(pk);
+        if (!values) learned.set(pk, (values = new Set(knowns!.flatMap((k) => [...k.pathnames].map((p) => splitPath(p)[i] ?? "")))));
+        // The same value was already made a parameter at this position, under this prefix: it's the same
+        // parameter in the longer path.
+        const sameValue = values.has(lit);
+        if (WORD_DIGITS.test(lit) && !sameValue) continue;
         let sum = summaries.get(pk);
-        if (!sum) summaries.set(pk, (sum = summarize([...new Set(knowns!.flatMap((k) => [...k.pathnames].map((p) => splitPath(p)[i] ?? "")))], taint)));
+        if (!sum) summaries.set(pk, (sum = summarize([...values], taint)));
         const sameShape = isIdShaped(lit) && sum.shapes.has(valueShape(lit));
         // A member of the collection this position belongs to (see TemplateOptions.members).
         let coll: string | undefined;
         for (let j = i - 1; j >= 0 && coll === undefined; j--) if (e.tokens[j] !== null) coll = e.tokens[j]!;
         const member = !!coll && !!members?.get(lit.toLowerCase())?.has(singular(coll).toLowerCase()) && !COMMON_SUBPATHS.has(lit.toLowerCase());
-        if (!sameShape && !member && !(taint && isIdShaped(lit) && isTainted(taint, lit)) && !looksLikeSibling(lit, sum)) continue;
+        if (
+          !sameValue &&
+          !sameShape &&
+          !member &&
+          !(taint && isIdShaped(lit) && isTainted(taint, lit)) &&
+          !looksLikeSibling(lit, sum) &&
+          !namedSibling(e, lit, values, bySibling.get(siblingKey(e, i)))
+        )
+          continue;
         e.tokens = e.tokens.map((t, j) => (j === i ? null : t));
         if (known.hints[i] && !e.hints[i]) e.hints[i] = known.hints[i]!;
         changed = true;
@@ -484,6 +509,20 @@ function summarize(known: string[], taint?: Taint): Summary {
     maxLen: Math.max(...lens),
     classes: new Set(sample.flatMap((v) => [...charClasses(v)])),
   };
+}
+
+/**
+ * A name at a position that holds names: `/repos/zkaya/blog/issues` next to
+ * `/repos/{owner}/{repo}/issues`, whose values are names too (`dotfiles`), with
+ * responses of the same shape. Ids (`/products/{productId}/reviews` from `101`)
+ * never pull a word (`/products/featured/reviews`) in, and neither do
+ * responses that differ or weren't recorded.
+ */
+function namedSibling(e: Entry, lit: string, known: Set<string>, siblings: Entry[] | undefined): boolean {
+  const name = (v: string) => /^[A-Za-z]+([-_.][A-Za-z]+)*$/.test(v) && !isValueSegment(v);
+  if (!siblings?.length || !name(lit) || !known.size || ![...known].every(name)) return false;
+  if (!e.hasJson || !e.keyPaths.size) return false;
+  return siblings.some((s) => s.hasJson && s.keyPaths.size > 0 && meanJaccard([e.keyPaths, s.keyPaths]) >= 0.6);
 }
 
 function looksLikeSibling(lit: string, sum: Summary): boolean {
