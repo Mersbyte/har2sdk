@@ -212,6 +212,10 @@ export function templatePaths(samples: PathSample[], opts: TemplateOptions = {})
       // (a label) or a person's own (`name`, `displayName`, `first_name` of a profile, kept as a recorded value).
       const named = isIdentity(opts.taint, seg) || (!!prevSeg && personWord(prevSeg) && (!!opts.taint?.labels.has(lower) || !!opts.taint?.values.has(lower)));
       if (opts.taint && isTainted(opts.taint, seg) && (isIdShaped(seg) || (prevSeg && (isPlural(prevSeg) || personWord(prevSeg)) && named && !COMMON_SUBPATHS.has(lower)))) return null;
+      // A recorded id behind a short letter prefix or before a short suffix (`u48213`, `user48213`, `user-48213`,
+      // `48213a`): the capture recorded the digits as data (`"id": 48213`), so the segment is that record's id.
+      const embedded = /^(\p{L}{1,12}[-_.]?)?(\p{Nd}{3,})([-_.]?\p{L}{1,4})?$/u.exec(seg);
+      if (opts.taint && embedded && (embedded[1] || embedded[3]) && isTainted(opts.taint, embedded[2]!) && !VERSION.test(seg)) return null;
       // A value the capture uses to name a person or tenant (a login, an owner) is a member id wherever it sits,
       // not only after a plural collection word: /u/dorukbey, /in/dorukbey, /api/v1/dorukbey/feed.
       if (prevSeg && strongIdentity(opts.taint, seg) && !COMMON_SUBPATHS.has(lower) && !API_WORD.test(seg)) return null;
@@ -629,6 +633,9 @@ function meanJaccard(sets: Set<string>[]): number {
   return pairs ? total / pairs : 1;
 }
 
+/** Collections whose members are periods (`/reports/2024`, `/years/2015`), not records with numeric ids. */
+const TIME_WORDS = /^(years?|archives?|reports?|stats|statistics|summar(y|ies)|calendars?|seasons?|editions?|holidays|budgets?|fiscal|taxes)$/i;
+
 /** `/users/{?}/orders/{?}` → ["userId", "orderId"] (by position). */
 function paramNames(tokens: (string | null)[], hints: Record<number, string> = {}, valuesAt?: (i: number) => string[]): Record<number, string> {
   const names: Record<number, string> = {};
@@ -641,7 +648,8 @@ function paramNames(tokens: (string | null)[], hints: Record<number, string> = {
     const vals = valuesAt?.(i) ?? [];
     if (hints[i]) {
       base = hints[i]!;
-    } else if (vals.length && vals.every((v) => /^(19|20)\d\d$/.test(v))) {
+    } else if (vals.length && vals.every((v) => /^(19|20)\d\d$/.test(v)) && !(typeof prev === "string" && isPlural(prev) && !TIME_WORDS.test(prev))) {
+      // A year (/archive/2015, /reports/2024): but /orders/2015 after a collection of records is an order's id.
       base = "year";
     } else if (vals.length && vals.every((v) => /^\d{4}-\d{2}-\d{2}$/.test(v))) {
       base = "date";

@@ -1,6 +1,6 @@
-# Launch kit — har2sdk 0.6.17
+# Launch kit — har2sdk 0.6.19
 
-Drafts for announcing 0.6.17. Every claim below is in the README; nothing here goes further. Post only after the repository is public and `npm publish` has run (the badge, `npx har2sdk` and the README images depend on both).
+Drafts for announcing 0.6.19. Every claim below is in the README; nothing here goes further. Post only after the repository is public and `npm publish` has run (the badge, `npx har2sdk` and the README images depend on both).
 
 Links used below:
 - Repo: https://github.com/Mersbyte/har2sdk
@@ -26,7 +26,7 @@ Links used below:
 >
 > The part I'd most like feedback on is privacy. HAR files contain session cookies, tokens and often other people's data, and the generated code is something you might publish. So there's a "leak guard": before generating, it collects every recorded value that looks like data or names a user/tenant, the generator consults that set when deciding what may become a path literal, enum member or property name, and afterwards every output is scanned. If `client.ts` or `openapi.json` contains a recorded value, nothing is written. The mock serves fake data with the recorded shape instead of the recorded bodies.
 >
-> To be clear about its limits: this is a heuristic built on evidence from the capture, not a proof. A value with no evidence in the parts of the capture it reads — a word used once as a path segment that nothing else names — can't be recognised, and one-word names of things (a category called "Books") are treated as vocabulary. The inputs of twenty-three review rounds are in the repo as tests, plus a generated privacy test that hides a random person in 30 kinds of places in a random capture and checks every output (30 seeds in CI; the long run of 1,000 seeds passes). Please look over `har2sdk inspect` before publishing generated code. If you find a leak, I'd much rather hear about it (see SECURITY.md).
+> To be clear about its limits: this is a heuristic built on evidence from the capture, not a proof. A value with no evidence in the parts of the capture it reads — a word used once as a path segment that nothing else names — can't be recognised, and one-word names of things (a category called "Books") are treated as vocabulary. The inputs of twenty-four review rounds are in the repo as tests, plus a generated privacy test that hides a random person in 30 kinds of places in a random capture and checks every output (30 seeds in CI; the long run of 1,000 seeds passes). Please look over `har2sdk inspect` before publishing generated code. If you find a leak, I'd much rather hear about it (see SECURITY.md).
 >
 > Naming is where a language model helps, so there's an optional MCP server and a copy-paste prompt; what a model sees is paths with `{params}`, parameter names, inferred types and GraphQL documents, checked against the guard's values first.
 >
@@ -55,9 +55,9 @@ Links used below:
 > ```
 >
 > Some type-level details that may interest this sub:
-> - Every sample is merged: optional vs. required, nullable, `date-time`/`uuid`/`email`/`uri` formats, and dictionaries keyed by ids become `Record<string, T>` instead of fake property names.
+> - Every sample is merged (of a long list, the first 200 items): optional vs. required, nullable, `date-time`/`uuid`/`email`/`uri` formats, and dictionaries keyed by ids become `Record<string, T>` instead of fake property names.
 > - Categorical fields (`status`, `type`, `currency`…) get open enums — `"a" | "b" | (string & {})` — so you get autocomplete without breaking when the server adds a value.
-> - Different 2xx shapes become a union; recorded error bodies get a type per status and a generated guard (`if (isGetFileError(err)) err.body`).
+> - 2xx objects with mostly different keys become a union, and a JSON endpoint also recorded empty returns `T | undefined`; recorded error bodies get a type per status and a generated guard (`if (isGetFileError(err)) err.body`).
 > - GraphQL operations, JSON-RPC methods and tRPC procedures each become a typed method.
 > - The output compiles under `strict`, `exactOptionalPropertyTypes` and `erasableSyntaxOnly`, uses the global `fetch` and has no dependencies.
 >
@@ -106,7 +106,7 @@ Links used below:
 > HAR files are full of cookies, tokens and other people's data. A leak guard collects recorded values first and refuses to write generated code that contains one. The mock serves fake data with the same shape, not your recordings.
 
 4/
-> It's a heuristic, not a proof: a value with no evidence in the parts of the capture it reads can't be recognised. The inputs of twenty-three review rounds are in the repo as tests, plus a generated privacy test across 30 kinds of places. Please check `har2sdk inspect` before publishing.
+> It's a heuristic, not a proof: a value with no evidence in the parts of the capture it reads can't be recognised. The inputs of twenty-four review rounds are in the repo as tests, plus a generated privacy test across 30 kinds of places. Please check `har2sdk inspect` before publishing.
 
 5/
 > Want better method names? An optional MCP server lets Claude (or any MCP client) name and document endpoints; a model only sees paths, names and types. For your own apps and APIs you're allowed to use. Feedback and leak reports welcome.

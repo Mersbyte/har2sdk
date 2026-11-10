@@ -398,7 +398,8 @@ function namesRelated(a: string, b: string): boolean {
 function vagueFits(vague: TypeNode, other: TypeNode): boolean {
   if (vague.k === "unknown") return true;
   if (vague.k === "array") return other.k === "array";
-  return other.k === "ref" || other.k === "record" || other.k === "map";
+  // An empty object fits a dictionary, never a named type with required fields: `{}` isn't a `Meta { page; total }`.
+  return other.k === "record" || other.k === "map";
 }
 
 function isVague(t: TypeNode): boolean {

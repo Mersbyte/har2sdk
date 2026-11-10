@@ -90,14 +90,27 @@ describe("A1 an empty list or object doesn't stand for another kind", () => {
     expect(lineOf(code, /^\s+mode: /).sort()).toEqual(["  mode: number;", "  mode: unknown[];"]);
   });
 
-  it("an empty list still merges with a list, and an empty object with an object", () => {
+  it("an empty list still merges with a list", () => {
+    const r = generateFromHar(
+      har([
+        entry({ url: `${O}/api/v1/a`, resBody: { box: { tags: ["x"], n: 1 } } }),
+        entry({ url: `${O}/api/v1/b`, resBody: { crate: { tags: [], n: 2 } } }),
+      ]),
+    );
+    expect(r.files["client.ts"]).toMatch(/export type (Box|Crate) = (Box|Crate);/);
+  });
+
+  // Review 24 (#7): `{}` isn't a `Meta { k: number }`, whose field is required. It merges only with a dictionary.
+  it("an empty object doesn't merge with a named type that has required fields", () => {
     const r = generateFromHar(
       har([
         entry({ url: `${O}/api/v1/a`, resBody: { box: { tags: ["x"], meta: { k: 1 } } } }),
         entry({ url: `${O}/api/v1/b`, resBody: { crate: { tags: [], meta: {} } } }),
       ]),
     );
-    expect(r.files["client.ts"]).toMatch(/export type (Box|Crate) = (Box|Crate);/);
+    const code = r.files["client.ts"]!;
+    expect(code).not.toMatch(/export type (Box|Crate) = (Box|Crate);/);
+    expect(compile({ "client.ts": code + `\nconst crate: Crate = { tags: [], meta: {} };\nvoid crate;` })).toBe("");
   });
 
   it("null, numbers and strings were already kept apart", () => {

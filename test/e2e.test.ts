@@ -154,7 +154,12 @@ void main;
     const api = new sdk.AcmeShopClient({ baseUrl, token: "anything" });
     const page = await api.listProducts({ category: "shoes", page: 2, limit: 4 });
     expect(page.page).toBe(2);
-    expect(page.items.map((p: any) => p.id)).toEqual([105]);
+    // Ids are faked too (review 24): one item, a three-digit id like the recorded one, but not the recorded 105.
+    const ids = page.items.map((p: any) => p.id);
+    expect(ids).toHaveLength(1);
+    expect(ids[0]).toBeGreaterThanOrEqual(100);
+    expect(ids[0]).toBeLessThan(1000);
+    expect(ids[0]).not.toBe(105);
 
     const product = await api.getProduct({ productId: 102 });
     // The mock serves fake data with the recorded shape: names become placeholder text.

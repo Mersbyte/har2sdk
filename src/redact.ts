@@ -8,6 +8,9 @@
 import { replaceEmails, stripUrlQueries, withoutQueryOrHash } from "./linear.js";
 import { setOwn, words } from "./words.js";
 
+/** The last word of an id key (`id`, `userId`, `orderNumber`, `sku`): the same list as the leak guard's. */
+const ID_KEY_WORDS = new Set(["id", "ids", "uuid", "guid", "number", "no", "nr", "num", "ref", "reference", "sku", "serial"]);
+
 export const REDACTED = "<redacted>";
 
 const SENSITIVE_WORDS = new Set([
@@ -460,6 +463,29 @@ export class Scrubber {
       .join(".");
   }
 
+  /**
+   * A recorded number, faked consistently (the same number gives the same fake everywhere) with the same
+   * number of digits and decimals: an integer of three or more digits under an id key (`id`, `userId`,
+   * `orderNumber`), any other integer of four or more digits (an account number, a salary) and any decimal
+   * (a balance, a price). Small integers (counts, pages, flags, quantities) stay, so the mock still pages
+   * and counts like the API.
+   */
+  private number(value: number, key?: string): number {
+    if (!Number.isFinite(value)) return value;
+    const abs = Math.abs(value);
+    const text = String(abs);
+    if (/e/i.test(text)) return value;
+    const [int = "", frac = ""] = text.split(".");
+    const idKey = !!key && ID_KEY_WORDS.has(words(key).at(-1) ?? "");
+    if (!frac && int.length < (idKey ? 3 : 4)) return value;
+    const fakeDigits = (d: string) => (d ? this.fake(d).replace(/\D/g, "0").padStart(d.length, "0").slice(0, d.length) : d);
+    // Keep the first digit non-zero so the fake has the recorded magnitude.
+    let fi = fakeDigits(int);
+    if (int.length > 1 && fi[0] === "0") fi = String((Number(int[0]) % 9) + 1) + fi.slice(1);
+    const out = Number(frac ? `${fi}.${fakeDigits(frac)}` : fi);
+    return Number.isFinite(out) ? out * Math.sign(value) : value;
+  }
+
   /** @param inRecord the value is a field of a person's record (an object with contact fields). */
   json(value: unknown, key?: string, depth = 0, inPersonal = false, inRecord = false): unknown {
     if (depth > 64) return null;
@@ -470,7 +496,7 @@ export class Scrubber {
     if (typeof value === "string") return idKeyName(key) && !DATEISH.test(value) && !isEmail(value) && value.length >= 3 ? this.fake(value) : this.string(value, personal, key);
     if (typeof value === "number") {
       if (personal) return 0;
-      return Number.isInteger(value) && Math.abs(value) >= 100000 ? Number(this.fake(String(Math.abs(value)))) * Math.sign(value) : value;
+      return this.number(value, key);
     }
     if (value === null || typeof value !== "object") return value;
     if (Array.isArray(value)) return value.map((v) => this.json(v, key, depth + 1, personal, inRecord));
@@ -634,7 +660,8 @@ export class Scrubber {
 
   /** A path parameter's value is an identifier by definition: always a fake (small numbers and dates stay). */
   id(v: string): string {
-    if (DATEISH.test(v) || /^\d{1,3}$/.test(v)) return v;
+    // A path parameter is an id: three or more digits are a record's id (as under an id key), so faked.
+    if (DATEISH.test(v) || /^\d{1,2}$/.test(v)) return v;
     if (isEmail(v) || /\s/.test(v)) return this.string(v);
     return this.fake(v);
   }
