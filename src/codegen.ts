@@ -1,12 +1,12 @@
 /**
  * TypeScript SDK emitter. Produces one self-contained `client.ts` with zero
- * runtime dependencies (uses the global `fetch`, Node 18+ or any browser).
+ * runtime dependencies (uses the global `fetch`, Node 20+ or any browser).
  */
 import type { Plan, PlannedOp, PlannedParam } from "./plan.js";
 import { printTs, printTsInterface, type TypeNode } from "./types.js";
 import { propertyKey } from "./words.js";
 
-export const VERSION = "0.6.18";
+export const VERSION = "0.6.19";
 
 export function generateTypeScript(plan: Plan): string {
   const { model, clientName, ops } = plan;
@@ -250,7 +250,7 @@ function opMethod(op: PlannedOp, plan: Plan): string[] {
     .map((l) => l!.replace(/\*\//g, "*\\/"));
   lines.push(`  /**`, ...doc.map((d) => `   * ${d}`), `   */`);
 
-  const ret = op.response.typeName;
+  const ret = op.response.typeName + (op.response.mayBeEmpty ? " | undefined" : "");
   const args: string[] = [];
   const optionalParams = !op.pathParams.length && op.queryParams.every((q) => !q.required);
   if (ep.graphql) {
@@ -319,7 +319,8 @@ function literalKey(name: string): string {
 
 /** JSON as a JS object literal (see {@link literalKey}). */
 function literal(value: unknown, indent?: number): string {
-  return JSON.stringify(value, null, indent).replace(/"__proto__":/g, `["__proto__"]:`);
+  // Only a whole key (after `{` or `,`): `"x\"__proto__":` is a key that merely ends in that text.
+  return JSON.stringify(value, null, indent).replace(/(?<=[{,]\s*)"__proto__":/g, `["__proto__"]:`);
 }
 
 function access(name: string): string {
@@ -462,8 +463,8 @@ function requestMethod(plan: Plan, ops: readonly PlannedOp[]): string[] {
     `    // party, on the first request and on every redirect. Per-call headers go to the origin the call was made to.`,
     `    const trusted = [this.baseUrl${multiOrigin ? `, ...(this.options.trustedOrigins ?? [])` : ""}].map((o) => new URL(o).origin);`,
     `    const called = url.origin;`,
-    `    // Header names are case-insensitive: one key per header, lower-cased, so \`Authorization\` in \`headers\``,
-    `    // replaces the token instead of being sent beside it.`,
+    `    // Header names are case-insensitive: one key per header, lower-cased, never two of one name. The token`,
+    `    // wins over an \`Authorization\` in the client's \`headers\`; one in a call's own \`headers\` wins over both.`,
     `    const put = (into: Record<string, string>, from: Record<string, string> | undefined): void => {`,
     `      for (const [key, value] of Object.entries(from ?? {})) into[key.toLowerCase()] = value;`,
     `    };`,

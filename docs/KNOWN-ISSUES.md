@@ -2,6 +2,14 @@
 
 Problems found by reviews that are not fixed yet, with the reason. The newest are first; each review's full list is in CHANGELOG.md.
 
+## From the 0.6.17 audit (review 24), not fixed in 0.6.19
+
+Fixed findings are in the 0.6.19 entry of CHANGELOG.md. These are open:
+
+- **Long lists.** Type inference reads the first 200 items of a list; a field that is only `null` or missing after item 200 is typed from the first 200 (documented in the README).
+- **False refusals.** Form-body field names with brackets (`role[admin]=…`, `notify[someone@…]=1`) become property names, so one carrying recorded data refuses the run (the same names in a query string are left out with a warning). A cookie named after a recorded multi-word tenant (`northwind_labs_session` for tenant `northwind-labs`) also refuses the run; only `--allow-leaks` gets past it.
+- **Primary origin.** Ranking is by credential kind, then endpoints. Two origins that both got the user's own credentials (an authorization header or a session cookie) are ranked by endpoints, so a crafted capture with more credentialed endpoints on another origin still wins; the warning says so, and `--base-url` fixes it. Over MCP the address can't be moved to another recorded origin (only the user can).
+
 ## From the 0.6.15 audit (review 20), not fixed in 0.6.16
 
 Fixed findings are in the 0.6.16 entry of CHANGELOG.md. These are open:

@@ -23,9 +23,9 @@ ${c.bold("har2sdk")} ${c.dim("v" + VERSION)} — turn browser network traffic in
 
 ${c.bold("Usage")}
   har2sdk <capture.har…> [options]         Generate client.ts + openapi.json (several captures are merged)
-  har2sdk inspect <capture.har>            List the endpoints that were found
-  har2sdk prompt <capture.har> [--copy]    Print a prompt to paste into any AI chat for better names
-  har2sdk mock <capture.har> [--port 4010] Replay recorded responses as a local API
+  har2sdk inspect <capture.har…>           List the endpoints that were found
+  har2sdk prompt <capture.har…> [--copy]   Print a prompt to paste into any AI chat for better names
+  har2sdk mock <capture.har…> [--port 4010] Replay recorded responses as a local API
   har2sdk mcp                              Start the MCP server (Claude Desktop / Code / Cursor)
 
 ${c.bold("Options")}
@@ -43,9 +43,12 @@ ${c.bold("Options")}
   --exclude-path <glob>    Drop matching paths, e.g. --exclude-path "/telemetry/*" (repeatable)
   --include-path <glob>    Keep matching paths even if they look like telemetry or static files (repeatable)
   --json                   (inspect) machine-readable output
+  --copy                   (prompt) copy the prompt to the clipboard
+  --delay <ms>             (mock) wait this long before each answer
   --raw                    (mock) serve recorded bodies unscrubbed (default: ids faked, personal data and secrets masked)
   --bind <address>         (mock) interface to listen on (default 127.0.0.1)
   --allow-host <name>      (mock, with --bind) also answer requests for this host name (repeatable)
+  --strict, --redact       Accepted for old scripts; refusing and redacting are the default now
   -h, --help               Show this help
   -v, --version            Show version
 
@@ -314,7 +317,7 @@ function printOverview(plan: Plan, source: string): void {
     `  ${model.stats.entries} requests → ${c.bold(String(model.stats.kept))} API calls → ${c.bold(String(plan.ops.length))} endpoints` +
       (dropped ? c.dim(`   (ignored: ${dropped})`) : ""),
   );
-  console.log(`  ${c.dim("origin")} ${model.primaryOrigin}   ${c.dim("auth")} ${authSummary(model)}\n`);
+  console.log(`  ${c.dim("origin")} ${model.primaryOrigin}   ${c.dim("auth")} ${stripControl(scrubText(authSummary(model), model.taint))}\n`);
   const width = Math.min(56, Math.max(...plan.ops.map((o) => (o.ep.path + (o.ep.graphql ? ` (${o.ep.graphql.operationName})` : "")).length)) + 2);
   for (const op of plan.ops) {
     const path = op.ep.graphql ? `${op.ep.path} ${c.magenta(op.ep.graphql.operationName)}` : highlightParams(op.ep.path);
@@ -353,7 +356,10 @@ async function loadAnnotations(file: string | undefined, outDir: string, harDir?
     return undefined;
   }
   try {
-    return parseAnnotations(await readFile(path, "utf8"));
+    const ann = parseAnnotations(await readFile(path, "utf8"));
+    // Found by default, not named with --annotations: say so, since the file may have come with the capture.
+    if (!file) console.error(c.dim(`  Using annotations from ${stripControl(relative(process.cwd(), path) || path)} (names, descriptions, renames).`));
+    return ann;
   } catch (err) {
     throw new Error(`Couldn't read ${path}: ${(err as Error).message}`);
   }

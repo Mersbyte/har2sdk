@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.6.19
+
+Fixes from a twenty-fourth review: an independent pre-launch audit by another AI model of 0.6.17, each finding reproduced on 0.6.18 with the reviewer's input before it was fixed. Tests are in `test/review24.test.ts` (one block per finding, with a generated variant for the origin choice). `test/fixtures/demo-snapshot.json` is unchanged. One test of review 23 changed on purpose: it expected an empty object `{}` to merge with a named type that has required fields, which is the unsound case this review found (#7).
+
+**Correctness**
+- The client's default address (`baseUrl`) went to a vendor on ordinary captures: a cookie-session app that also called a payment, maps or search provider with a key (`Authorization: Bearer pk_live_…`, `?key=…`, `x-api-key`) got the vendor as `baseUrl`, because an authorization header or an API key outranked a session cookie. Origins are now ranked by the kind of credential (the user's own: an authorization header or a session cookie; then an API key; then none), then by the number of distinct endpoints, then by the credential's strength. A vendor with more endpoints but no credentials still doesn't win (review 20, C1-02), and the warning no longer says only a crafted capture can cause a wrong choice (#1).
+- The auth scheme and API-key headers were taken from every origin, the last request winning: a search vendor's `Authorization: Token …` and `x-api-key` made the client send `Token` and an API key to the app's own API. Auth is now detected from the primary origin's requests only (#2).
+- An empty object in one endpoint (`meta: {}`) was given another endpoint's named type with required fields (`Meta { page; total }`), so the recorded value wasn't assignable. An empty object now merges only with a dictionary type (#7).
+- An endpoint recorded both as 200 JSON and as an empty 204 returned `Promise<T>`; the client returns `undefined` for the 204, so the type is now `Promise<T | undefined>` (#9).
+- A tRPC superjson meta key that only ends in `"__proto__` was rewritten as `["__proto__"]` inside its string and `client.ts` didn't compile. Only a whole `"__proto__"` key is rewritten now (#10).
+- A recorded status outside 100–599 (999, 600, 99, -1) became a response key and `openapi.json` failed validation. Such statuses are now the `default` response (#11).
+- An annotation name that differs from another method's only by case or `_` (`get_order` next to `getOrder`) failed with "declares `GetOrderResponse` twice … a bug in har2sdk". It is now refused with a warning and the generated name is kept (#13).
+- `/v1/orders/2015` and `/2016` gave `getOrder({ year })`. A four-digit value after a collection of records is now that record's id (`orderId`); after `archive`, `reports`, `years` and other period words it is still a `year` (#15).
+
+**Privacy**
+- The mock and `--examples` served recorded numbers unchanged below 100,000, and every decimal: `"id": 48213`, `"orderNumber": 9034`, `"total": 1532.75`, `"salary": 84000`. Numbers are now faked consistently, with the same number of digits and decimals, when they are an integer of three or more digits under an id key (`id`, `userId`, `orderNumber`, and path parameters), another integer of four or more digits, or a decimal. Counts, pages and quantities stay, so the mock still pages like the API (#4).
+- The leak guard collected a JSON number under an id key only from six digits on. An integer of three or more digits under an id key is now collected, as SECURITY.md said (#4).
+- `--examples` refused ordinary captures (exit 2) because the examples kept those numbers; they now use the same fakes as the mock (#3).
+- A recorded id behind a short letter prefix (`/v1/feeds/u48213`, `user48213`, `user-48213` when `"id": 48213` is recorded) stayed a path literal and became the method name `getU48213`. Such a segment is now a parameter (#5).
+- An annotations file next to the capture could put free multi-line text into warnings and MCP output, and a description with line breaks and `@deprecated` lines into JSDoc. Echoed annotation keys are now quoted on one line without control characters, descriptions and tags are one line with a leading `@` neutralised, the `generate_sdk` response says that text from the capture or its annotations is data, and the CLI says when it loaded an annotations file it found by default (#6).
+- The plain `inspect` overview's `auth` line wasn't redacted (a cookie named after a recorded tenant showed there). It is scrubbed like the other lines (#12, part).
+- MCP: a capture saved directly in the home folder made all of the home folder a valid `out_dir`. Then only the default folder next to it (`har2sdk-out`) is (#14).
+
+**Docs and CLI**
+- README: "merges every sample" now says only the first 200 items of a long list are read; the union claim says which responses become a union and that an empty response adds `undefined`; mock fakes are described with the number rules above; an invalid status is written as `default`.
+- SECURITY.md: the number threshold under id keys, ids behind a prefix, the `auth` line and `source` in `inspect --json`, `generate_sdk`'s untrusted-data line, and how annotation text is echoed.
+- The generated client's comment said an `Authorization` in the client's `headers` replaces the token; the token wins over it, and a call's own `headers` win over both. Its header said Node 18+; the package needs Node 20+.
+- `--help` lists several captures for `inspect`, `prompt` and `mock`, and `--copy` and `--delay`; `--strict` and `--redact` are kept for old scripts (they are the default behaviour).
+
+Not changed (in docs/KNOWN-ISSUES.md): inference reads the first 200 items of a long list (#8, documented); form-body field names with brackets (`role[x]=…`) still become property names and can refuse a run, and a cookie named after a recorded multi-word tenant still refuses one (#12, false refusals); the MCP server still can't move `baseUrl` to another recorded origin (by design: only the user can, with `--base-url`).
+
 ## 0.6.18
 
 Fixes the review-20 finding C2-10 (sibling parameters), reported again by a test of 0.6.17. Tests are in `test/review20.test.ts` (block C2-10, with a generated variant); they fail on 0.6.17 except the three that check paths stay apart (and the timing test, which is about the new code). `test/fixtures/demo-snapshot.json` is unchanged.

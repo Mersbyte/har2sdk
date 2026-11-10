@@ -43,6 +43,8 @@ export interface PlannedOp {
     status?: number;
     /** Per-status types when distinct 2xx responses have different shapes. */
     byStatus?: Map<number, TypeNode>;
+    /** A JSON response that was also recorded empty (a 204, or a 200 with no body): the client returns `undefined`. */
+    mayBeEmpty?: boolean;
   };
   /** Error bodies (4xx/5xx JSON), if any were recorded: one type, or a union of per-status types. */
   error?: { type: TypeNode; typeName: string; byStatus?: Map<number, TypeNode> };
@@ -248,7 +250,7 @@ function planOp(ep: Endpoint, model: ApiModel, registry: TypeRegistry, warnings:
     queryParams,
     paramsTypeName: pathParams.length || queryParams.length ? P + "Params" : undefined,
     body,
-    response: { type, typeName, kind, status: ok[0]?.status, ...(byStatus ? { byStatus } : {}) },
+    response: { type, typeName, kind, status: ok[0]?.status, ...(byStatus ? { byStatus } : {}), ...(kind === "json" && ok.some((r) => r.kind === undefined) ? { mayBeEmpty: true } : {}) },
     ...(error ? { error } : {}),
     foreignOrigin,
   };

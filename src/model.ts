@@ -200,15 +200,21 @@ export function analyzeExchanges(all: Exchange[], opts: AnalyzeOptions = {}): Ap
 
   // --- 2. group into endpoints -------------------------------------------------
   // The primary origin becomes `baseUrl`, the only origin that gets the user's credentials. So it is the
-  // origin the app sent its own credentials to (an authorization header beats an API key, which beats a
-  // session cookie), and only among equals the one with the most distinct endpoints, not the most requests:
-  // a vendor with more endpoints, or a chatty telemetry host, shouldn't get the token or name the SDK.
+  // origin the app sent the user's own credentials to: an authorization header or a session cookie (who the
+  // user is) beats an API key in a header or the query string (usually a vendor's key embedded in the page:
+  // maps, payments, search), which beats nothing. Among origins of one class the one with the most distinct
+  // endpoints wins, then the stronger credential, then the most requests: a cookie-session app that also
+  // calls a payment provider with a key keeps its own origin, and a vendor with more endpoints but no
+  // credentials, or a chatty telemetry host, still doesn't get the token or name the SDK.
   const originCounts = new Map<string, number>();
   const originPaths = new Map<string, Set<string>>();
   const originAuth = new Map<string, number>();
+  const originClass = new Map<string, number>();
   for (const ex of kept) {
     originCounts.set(ex.origin, (originCounts.get(ex.origin) ?? 0) + 1);
-    originAuth.set(ex.origin, Math.max(originAuth.get(ex.origin) ?? 0, credentialStrength(ex, taint)));
+    const strength = credentialStrength(ex, taint);
+    originAuth.set(ex.origin, Math.max(originAuth.get(ex.origin) ?? 0, strength));
+    originClass.set(ex.origin, Math.max(originClass.get(ex.origin) ?? 0, credentialClass(strength)));
     const t = templates.get(ex.origin + ex.pathname);
     if (t) originPaths.set(ex.origin, (originPaths.get(ex.origin) ?? new Set()).add(ex.method + " " + t.template));
   }
@@ -216,20 +222,27 @@ export function analyzeExchanges(all: Exchange[], opts: AnalyzeOptions = {}): Ap
     .map(([origin, count]) => ({ origin, count }))
     .sort(
       (a, b) =>
-        (originAuth.get(b.origin) ?? 0) - (originAuth.get(a.origin) ?? 0) ||
+        (originClass.get(b.origin) ?? 0) - (originClass.get(a.origin) ?? 0) ||
         (originPaths.get(b.origin)?.size ?? 0) - (originPaths.get(a.origin)?.size ?? 0) ||
-        b.count - a.count,
+        (originAuth.get(b.origin) ?? 0) - (originAuth.get(a.origin) ?? 0) ||
+        b.count - a.count ||
+        a.origin.localeCompare(b.origin),
     );
   const primaryOrigin = origins[0]?.origin ?? "";
   const multiOrigin = origins.length > 1;
   const alsoCredentialed = origins.slice(1).filter((o) => (originAuth.get(o.origin) ?? 0) > 0);
   let primaryOriginWarning: string | undefined;
   if (multiOrigin) {
-    const why = (originAuth.get(primaryOrigin) ?? 0) > 0 ? "the origin the app sent its credentials to" : "the origin with the most endpoints (no credentials were recorded)";
+    const why =
+      (originClass.get(primaryOrigin) ?? 0) === 2
+        ? "of the origins the app sent the user's own credentials to (an authorization header or a session cookie), the one with the most endpoints"
+        : (originClass.get(primaryOrigin) ?? 0) === 1
+          ? "of the origins the app sent an API key to, the one with the most endpoints"
+          : "the origin with the most endpoints (no credentials were recorded)";
     const others = origins.slice(1).map((o) => o.origin);
     primaryOriginWarning =
       `The client's default address (baseUrl) is ${primaryOrigin}: ${why}. The capture also called ${others.slice(0, 5).join(", ")}${others.length > 5 ? ` and ${others.length - 5} more` : ""}. ` +
-      `If ${primaryOrigin} isn't the API you meant, the capture may have been crafted: set --base-url (or \`baseUrl\` in code) before giving the client real credentials.`;
+      `If ${primaryOrigin} isn't the API you meant (a vendor the page called, or a crafted capture), set --base-url (or \`baseUrl\` in code) before giving the client real credentials.`;
   }
   if (alsoCredentialed.length) {
     warnings.push(
@@ -300,7 +313,9 @@ export function analyzeExchanges(all: Exchange[], opts: AnalyzeOptions = {}): Ap
     ...(primaryOriginWarning ? { primaryOriginWarning } : {}),
     origins,
     stats: { entries: all.length, kept: kept.length, dropped },
-    auth: detectAuth(kept, taint),
+    // Only the primary origin's requests: the client authenticates there, and another origin's scheme or key
+    // header (a search vendor's `Token …`, a maps key) would make every call to the API fail.
+    auth: detectAuth(kept.filter((ex) => ex.origin === primaryOrigin), taint),
     defaultHeaders,
     otherHeaders: detectOtherHeaders(kept, defaultHeaders, taint),
     endpoints,
@@ -1205,6 +1220,11 @@ function nameCarriesData(name: string, taint: Taint, whole = true): boolean {
 }
 
 /** How strongly a request carries the app's own credentials: 3 authorization, 2 API key, 1 session cookie, 0 none. */
+/** 2: the user's own identity (an authorization header or a session cookie); 1: an API key; 0: none. */
+function credentialClass(strength: number): number {
+  return strength === 3 || strength === 1 ? 2 : strength === 2 ? 1 : 0;
+}
+
 function credentialStrength(ex: Exchange, taint: Taint): number {
   if (ex.requestHeaders.get("authorization")) return 3;
   for (const name of ex.requestHeaders.keys()) if (API_KEY_HEADERS.test(name)) return 2;

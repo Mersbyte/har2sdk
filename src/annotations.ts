@@ -81,31 +81,52 @@ function pathText(path: readonly PropertyKey[]): string {
     .join("");
 }
 
+/**
+ * Text from an annotations file, echoed in a warning: quoted, without line breaks or control characters and
+ * cut short. The file may come with a capture from someone else, and warnings reach a model over MCP.
+ */
+function shown(s: string): string {
+  return JSON.stringify(oneLine(s, 80));
+}
+
+/**
+ * A description or tag: one line (it is written into JSDoc and shown to a model), no control or format
+ * characters, no comment terminator, and no leading `@` that a JSDoc reader would take for a tag.
+ */
+function oneLine(s: string, max: number): string {
+  let t = s.replace(/[\p{Cc}\p{Cf}\u2028\u2029]+/gu, " ").replace(/\s+/g, " ").trim().replace(/\*\//g, "* /");
+  t = t.replace(/(^|\s)@(?=\w)/g, "$1＠");
+  return t.length > max ? t.slice(0, max - 1) + "…" : t;
+}
+
 /** Mutates the model in place. Returns human-readable warnings. */
 export function applyAnnotations(model: ApiModel, ann: Annotations | undefined): string[] {
   const warnings: string[] = [];
   if (!ann?.endpoints) return warnings;
   const byId = new Map(model.endpoints.map((e) => [e.id, e]));
-  const taken = new Set(model.endpoints.map((e) => e.name));
+  // Method names are compared as their type names are made (`get_order` and `getOrder` both give
+  // `GetOrderResponse`): two names that differ only by case or `_` / `$` would declare a type twice.
+  const norm = (n: string) => n.replace(/[_$]/g, "").toLowerCase();
+  const taken = new Set(model.endpoints.map((e) => norm(e.name)));
 
   for (const [id, a] of Object.entries(ann.endpoints)) {
     const ep = byId.get(id);
     if (!ep) {
-      warnings.push(`Annotation for unknown endpoint "${id}" was ignored.`);
+      warnings.push(`Annotation for unknown endpoint ${shown(id)} was ignored.`);
       continue;
     }
     if (a.name && a.name !== ep.name) {
       const name = isIdentifier(a.name) ? a.name : safeIdentifier(a.name);
-      if (RESERVED_METHOD_NAMES.has(name)) warnings.push(`Name "${name}" for "${id}" is reserved (the client uses it, or it would make the client a thenable); kept "${ep.name}".`);
-      else if (taken.has(name)) warnings.push(`Name "${name}" for "${id}" is already used; kept "${ep.name}".`);
+      if (RESERVED_METHOD_NAMES.has(name)) warnings.push(`Name "${name}" for ${shown(id)} is reserved (the client uses it, or it would make the client a thenable); kept "${ep.name}".`);
+      else if (taken.has(norm(name))) warnings.push(`Name "${name}" for ${shown(id)} is already used (or differs from a used one only by case or "_"); kept "${ep.name}".`);
       else {
-        taken.delete(ep.name);
-        taken.add(name);
+        taken.delete(norm(ep.name));
+        taken.add(norm(name));
         ep.name = name;
       }
     }
-    if (a.description) ep.description = a.description.trim();
-    if (a.tag) ep.tag = a.tag.trim();
+    if (a.description) ep.description = oneLine(a.description, 500);
+    if (a.tag) ep.tag = oneLine(a.tag, 60);
     if (a.params) {
       for (const [from, toRaw] of Object.entries(a.params)) {
         const to = safeIdentifier(toRaw);
@@ -113,7 +134,7 @@ export function applyAnnotations(model: ApiModel, ann: Annotations | undefined):
         const qp = ep.queryParams.find((p) => p.name === from);
         const clash = [...ep.pathParams, ...ep.queryParams].some((p) => p.name === to && p.name !== from);
         if (clash) {
-          warnings.push(`Can't rename "${from}" to "${to}" on "${id}": name already used.`);
+          warnings.push(`Can't rename ${shown(from)} to "${to}" on ${shown(id)}: name already used.`);
           continue;
         }
         if (pp) {
@@ -123,7 +144,7 @@ export function applyAnnotations(model: ApiModel, ann: Annotations | undefined):
           ep.path = "/" + ep.tokens.map(tokenText).join("/") + (ep.trailingSlash ? "/" : "");
         } else if (qp) {
           qp.name = to; // wireName stays: that's what the server expects
-        } else warnings.push(`No parameter "${from}" on "${id}".`);
+        } else warnings.push(`No parameter ${shown(from)} on ${shown(id)}.`);
       }
     }
   }

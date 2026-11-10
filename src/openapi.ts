@@ -127,7 +127,8 @@ function restOperation(op: PlannedOp, opts: OpenApiOptions): Record<string, unkn
 
   const responses: Record<string, unknown> = {};
   for (const r of ep.responses) {
-    const key = r.status ? String(r.status) : "default";
+    // OpenAPI response keys are HTTP statuses (100–599); anything else recorded (0, 999, -1) is the `default` response.
+    const key = Number.isInteger(r.status) && r.status >= 100 && r.status <= 599 ? String(r.status) : "default";
     const res: Record<string, unknown> = { description: `Observed ${r.count}×` };
     if (r.kind === "json") {
       const isOk = r.status >= 200 && r.status < 300;

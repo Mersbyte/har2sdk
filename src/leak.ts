@@ -507,7 +507,10 @@ export class TaintCollector {
   addNumber(n: number, key?: string): void {
     if (Number.isInteger(n) && Math.abs(n) < 1000 && !key) return;
     const s = String(n);
-    if (s.replace(/[-.]/g, "").length >= 6 || (s.length >= 4 && keyKind(key) === 1)) this.taint.values.add(s);
+    const digits = s.replace(/[-.]/g, "").length;
+    // Under an id key (`id`, `userId`, `orderNumber`…) an integer of three or more digits is a record's id.
+    const idValue = keyKind(key) === 2 && Number.isInteger(n) && digits >= 3;
+    if (digits >= 6 || idValue || (s.length >= 4 && keyKind(key) === 1)) this.taint.values.add(s);
   }
 
   private inJwt = false;
